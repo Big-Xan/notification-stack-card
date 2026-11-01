@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.6.1
+ * notification-stack-card.js  v0.6.2
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -12,7 +12,7 @@
  * joins a combined alert. Persistent notifications are dismissed in Home Assistant.
  */
 
-const NSC_VERSION = '0.6.1';
+const NSC_VERSION = '0.6.2';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -430,7 +430,7 @@ const STYLE = `
 .msg.scrolling { display: block; -webkit-line-clamp: unset; max-height: calc(var(--nsc-lines, 2) * 1.35em); }
 .msg.scrolling .mi { display: block; animation: nsc-scroll var(--nsc-scroll-dur, 8s) ease-in-out infinite alternate; }
 .item.full .msg { display: block; -webkit-line-clamp: unset; max-height: none; }
-.stack.compact .item:not(.full) .actions { display: none; }
+.stack.compact .item:not(.full) .actions:not(.snz) { display: none; }
 .item.full .msg .mi, .item.behind .msg .mi { animation: none; }
 @keyframes nsc-scroll {
   0%, 18% { transform: translateY(0); }
@@ -1352,7 +1352,11 @@ class NotificationStackCard extends HTMLElement {
     if (fold && !fold.top) return fold.open();
 
     if (t.closest('[data-close]')) return this._animateOut(item, 1, () => this._dismiss(alert));
-    if (t.closest('[data-snz-open]')) return this._setSnoozeOpen(this._snoozeOpen === alert.id ? null : alert.id);
+    if (t.closest('[data-snz-open]')) {
+      // On a folded stack, open it first so the snooze options have room.
+      if (fold) fold.open();
+      return this._setSnoozeOpen(!fold && this._snoozeOpen === alert.id ? null : alert.id);
+    }
     if (t.closest('[data-snz-cancel]')) return this._setSnoozeOpen(null);
     const snzBtn = t.closest('[data-snz]');
     if (snzBtn) return this._snooze(item, alert, Number(snzBtn.dataset.snz));

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.2 — 2026-10-31
+
+- **Fix**: tapping snooze on a collapsed stack only gave haptic feedback. It now opens the stack (or folded sub-stack) with the snooze options showing. With `compact`, a single card shows its snooze options in place.
+
 ## 0.6.1 — 2026-10-31
 
 - **Fix**: `when_empty: reserve` could keep far more space than the card used. Two copies of the card with the same `storage_key` shared one height memory, so a taller layout overwrote a shorter one, and a single card showing its buttons could set the height. Heights are now remembered per layout, ignore cards that were tapped open, and fall back to `collapsed_height` before a height has been seen.

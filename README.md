@@ -26,7 +26,7 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
 1. Copy `notification-stack-card.js` to `/config/www/`.
 2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.6.1`
+   - URL: `/local/notification-stack-card.js?v=0.6.2`
    - Type: JavaScript module
 3. Reload the browser. Bump the `?v=` number after every update.
 
