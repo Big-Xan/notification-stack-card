@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.5.0
+ * notification-stack-card.js  v0.6.1
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -12,7 +12,7 @@
  * joins a combined alert. Persistent notifications are dismissed in Home Assistant.
  */
 
-const NSC_VERSION = '0.5.0';
+const NSC_VERSION = '0.6.1';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -43,6 +43,7 @@ const DEFAULTS = {
   width: '',
   height: '',
   collapsed_height: '',
+  compact: false,
   card_align: 'left',
   card_style: 'theme',
   max_peek: 2,
@@ -429,6 +430,7 @@ const STYLE = `
 .msg.scrolling { display: block; -webkit-line-clamp: unset; max-height: calc(var(--nsc-lines, 2) * 1.35em); }
 .msg.scrolling .mi { display: block; animation: nsc-scroll var(--nsc-scroll-dur, 8s) ease-in-out infinite alternate; }
 .item.full .msg { display: block; -webkit-line-clamp: unset; max-height: none; }
+.stack.compact .item:not(.full) .actions { display: none; }
 .item.full .msg .mi, .item.behind .msg .mi { animation: none; }
 @keyframes nsc-scroll {
   0%, 18% { transform: translateY(0); }
@@ -540,7 +542,16 @@ class NotificationStackCard extends HTMLElement {
     this._config = cfg;
 
     const key = cfg.storage_key || 'default';
-    this._keys = { dismissed: `nsc-dismissed:${key}`, snoozed: `nsc-snoozed:${key}`, height: `nsc-height:${key}` };
+    // Remembered height is per layout, so two copies of the card with different layouts don't overwrite each other.
+    const layout = ['collapsed_height', 'max_peek', 'peek_offset', 'compact', 'message_lines', 'title_font_size',
+      'message_font_size', 'group_label', 'card_style', 'width', 'show_time'].map((k) => String(cfg[k] ?? '')).join('|');
+    let hash = 0;
+    for (const ch of layout) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+    this._keys = {
+      dismissed: `nsc-dismissed:${key}`,
+      snoozed: `nsc-snoozed:${key}`,
+      height: `nsc-height:${key}:${(hash >>> 0).toString(36)}`,
+    };
     this._dismissed = readStore(this._keys.dismissed);
     this._snoozed = readStore(this._keys.snoozed);
     this._reserveH = Number(readStore(this._keys.height).h) || 0;
@@ -1199,6 +1210,8 @@ class NotificationStackCard extends HTMLElement {
     const cfg = this._config;
     const alerts = this._alerts;
     const n = alerts.length;
+    // Compact: buttons stay hidden until the stack opens (or a lone card is tapped).
+    this._stack.classList.toggle('compact', !!cfg.compact && !this._expanded);
     this._items.forEach((el) => this._fitMessage(el));
     const H = new Map();
     alerts.forEach((a) => {
@@ -1253,10 +1266,12 @@ class NotificationStackCard extends HTMLElement {
     this._heads.forEach((el) => this._placeHead(el, 0, false));
 
     if (n === 0) {
+      // Keep the space of the collapsed card: its last height on this layout, else the max collapsed height.
       total = cfg.when_empty === 'reserve' && !this.preview ? this._reserveH || pxNumber(cfg.collapsed_height) || 76 : 0;
     } else if (!this._expanded) {
       total = n > 1 ? fold(alerts, 0, pxNumber(cfg.collapsed_height), 'main') : list(alerts, 0) - gap;
-      if (Math.abs(total - this._reserveH) > 1) {
+      const opened = [...this._items.values()].some((el) => el.classList.contains('full'));
+      if (!opened && Math.abs(total - this._reserveH) > 1) {
         this._reserveH = total;
         writeStore(this._keys.height, { h: total });
       }
@@ -1348,6 +1363,11 @@ class NotificationStackCard extends HTMLElement {
       // One tap opens the stack and, if this message is cut off, shows all of it.
       if (this._isCut(item)) item.classList.add('full');
       return fold.open();
+    }
+    const hidden = this._stack.classList.contains('compact') && !item.classList.contains('full');
+    if (hidden && (item.querySelector('.actions') || this._isCut(item))) {
+      item.classList.add('full');
+      return this._layout();
     }
     if (alert.tap_action) {
       this._haptic();
@@ -1656,6 +1676,7 @@ const LABELS = {
   collapsed_height: 'Max height when collapsed',
   card_align: 'Card alignment',
   card_style: 'Card look',
+  compact: 'Compact when collapsed',
   max_peek: 'Cards peeking behind',
   peek_offset: 'Peek offset',
   message_lines: 'Message lines',
@@ -1727,6 +1748,7 @@ const HELPERS = {
   collapsed_height:
     'In px, includes the peeking cards. Tighter peeks first, then fewer peeking cards, then the top card fades out at the bottom.',
   show_groups: 'Leave empty to show every group.',
+  compact: 'Hides buttons until the stack is opened, or until a single card is tapped. Keeps the collapsed stack short.',
   group_label: 'Color dot keeps the group color next to the title without the name. The icon uses the group color either way.',
   card_style: 'Match my theme draws each notification as a normal Home Assistant card, so themes like Frosted Glass style it like your other cards.',
   message_overflow: 'Scrolling moves slowly through text past the line limit, then back. Tap a card to show it all.',
@@ -2151,6 +2173,7 @@ class NotificationStackCardEditor extends HTMLElement {
         },
         grid({ name: 'width', selector: sel.text }, { name: 'card_align', selector: sel.select(ALIGN_OPTIONS) }),
         grid({ name: 'collapsed_height', selector: sel.num(40, 2000, 'px') }, { name: 'height', selector: sel.text }),
+        { name: 'compact', selector: sel.bool },
         grid({ name: 'max_peek', selector: sel.num(0, 5) }, { name: 'peek_offset', selector: sel.num(0, 40, 'px') }),
         grid(
           { name: 'message_lines', selector: sel.num(1, 10) },

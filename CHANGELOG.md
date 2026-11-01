@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1 — 2026-10-31
+
+- **Fix**: `when_empty: reserve` could keep far more space than the card used. Two copies of the card with the same `storage_key` shared one height memory, so a taller layout overwrote a shorter one, and a single card showing its buttons could set the height. Heights are now remembered per layout, ignore cards that were tapped open, and fall back to `collapsed_height` before a height has been seen.
+
 ## 0.6.0 — 2026-10-31
 
 - **`compact`**: while collapsed, buttons stay hidden so the stack can be very short (a 75px stack fits comfortably). They show when the stack opens; a single card shows them on the first tap, and its tap action runs on the next.

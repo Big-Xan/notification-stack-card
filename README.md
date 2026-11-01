@@ -26,7 +26,7 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
 1. Copy `notification-stack-card.js` to `/config/www/`.
 2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.6.0`
+   - URL: `/local/notification-stack-card.js?v=0.6.1`
    - Type: JavaScript module
 3. Reload the browser. Bump the `?v=` number after every update.
 
@@ -65,7 +65,7 @@ Everything can also be set up in the visual editor.
 | Option | Default | Description |
 |---|---|---|
 | `title` | – | Header text |
-| `when_empty` | `hide` | `hide` (takes no space), `reserve` (invisible, keeps the collapsed card's height so the layout doesn't move) or `show` (shows `empty_text`) |
+| `when_empty` | `hide` | `hide` (takes no space), `reserve` (invisible, keeps the collapsed card's last height on this layout, or `collapsed_height` before it has been seen, so the layout doesn't move) or `show` (shows `empty_text`) |
 | `show_header` | `true` | Show the header. When off, Clear, Show less and the snoozed chip sit under the stack |
 | `header_align` | `left` | `left`, `center` or `right` |
 | `header_padding_left` / `header_padding_right` | `4` | Header side padding (px) |
