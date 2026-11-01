@@ -4,7 +4,7 @@ A lightweight, stacked, tap-to-expand notification card for Home Assistant. Aler
 
 One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
-<img width="1254" height="894" alt="Compact Frosted Notification Stack Cropped" src="https://github.com/user-attachments/assets/fe11d447-e95c-4919-be8f-160c557b9c71" />
+<img width="1254" height="894" alt="image" src="https://github.com/user-attachments/assets/bd39f628-f070-42fd-95e1-e9c9bff24e93" />
 
 
 ## Features
