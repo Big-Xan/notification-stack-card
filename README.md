@@ -4,6 +4,7 @@ A lightweight, stacked, tap-to-expand notification card for Home Assistant. Aler
 
 One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
+
 ## Features
 
 - **Stack that expands on tap**, with the most severe and newest alert on top and up to five cards peeking behind

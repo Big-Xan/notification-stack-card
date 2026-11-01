@@ -1,18 +1,19 @@
 /*
- * notification-stack-card.js  v0.2.0
- * A stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
+ * notification-stack-card.js  v0.3.0
+ * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
- * Alerts come from rules (entity states) and, optionally, Home Assistant's own
- * persistent notifications. Rules can belong to a group, which supplies shared
- * defaults (color, icon, severity, dismiss/snooze behaviour, tap action, buttons,
- * conditions). A multi-entity rule can `combine` its matches into one notification.
+ * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
+ * notifications. Rules can belong to a group, which supplies shared defaults plus
+ * quiet hours, zone limits and a sub-stack in the expanded list. Any card can share its
+ * groups, alerts and snooze options as a template that other cards reuse.
  *
- * Dismiss and snooze are stored per device (localStorage). A dismissed or snoozed
- * alert comes back when something new happens: an entity changes state again or a
- * new entity joins a combined alert. Persistent notifications are dismissed in HA.
+ * Dismiss and snooze are stored per device (localStorage). A dismissed or snoozed alert
+ * comes back when something new happens: an entity changes state again or a new entity
+ * joins a combined alert. Persistent notifications are dismissed in Home Assistant.
  */
 
-const NSC_VERSION = '0.2.0';
+const NSC_VERSION = '0.3.0';
+const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
 const DEFAULT_ICONS = {
@@ -21,6 +22,9 @@ const DEFAULT_ICONS = {
   info: 'mdi:information-outline',
 };
 const UNAVAILABLE = ['unavailable', 'unknown'];
+const EMPTY_MODES = ['hide', 'reserve', 'show'];
+const COUNT_POSITIONS = ['right', 'left', 'hidden'];
+const SNOOZED_POSITIONS = ['buttons', 'before_title', 'after_title', 'hidden'];
 
 const DEFAULT_SNOOZE = [
   { label: '5 minutes', minutes: 5 },
@@ -34,8 +38,11 @@ const DEFAULTS = {
   header_align: 'left',
   header_padding_left: 4,
   header_padding_right: 4,
+  count_position: 'right',
+  snoozed_position: 'buttons',
   width: '',
   height: '',
+  collapsed_height: '',
   card_align: 'left',
   max_peek: 2,
   peek_offset: 10,
@@ -43,30 +50,36 @@ const DEFAULTS = {
   auto_collapse: 0,
   sort: 'severity',
   show_time: true,
-  hide_when_empty: true,
+  when_empty: 'hide',
   empty_text: 'All clear',
   persistent_notifications: false,
   persistent_severity: 'info',
   persistent_icon: 'mdi:bell-outline',
   persistent_group: '',
+  group_stacks: true,
+  show_groups: [],
+  show_ungrouped: true,
+  zone_person: '',
   snooze: true,
   snooze_display: 'icon',
   snooze_label: 'Snooze',
-  show_snoozed: true,
   snooze_options: DEFAULT_SNOOZE,
+  template_name: '',
+  templates: [],
   storage_key: '',
   styles: '',
 };
 
 // ---------- helpers ----------
 
-const toList = (v) => (v === undefined || v === null ? [] : Array.isArray(v) ? v : [v]);
+const toList = (v) => (v === undefined || v === null || v === '' ? [] : Array.isArray(v) ? v : [v]);
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const isBlank = (v) =>
-  v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length) ||
-  (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+  v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length) || (isObj(v) && !Object.keys(v).length);
 const validSeverity = (s) => (SEVERITY_RANK[s] !== undefined ? s : undefined);
+const oneOf = (v, list, fallback) => (list.includes(v) ? v : fallback);
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -84,6 +97,11 @@ const cssSize = (v) => {
   return /^\d+(\.\d+)?$/.test(s) ? `${s}px` : s;
 };
 
+const pxNumber = (v) => {
+  const n = parseFloat(String(v ?? ''));
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+
 const cssColor = (v) => {
   if (isBlank(v)) return '';
   if (Array.isArray(v) && v.length >= 3) return `rgb(${v.slice(0, 3).map(Number).join(', ')})`;
@@ -99,7 +117,6 @@ const joinNames = (names) => {
 const timeOf = (ts) => new Date(ts || 0).getTime() || 0;
 
 function relTime(ts, long = false) {
-  if (!ts) return '';
   const t = timeOf(ts);
   if (!t) return '';
   const diff = Math.max(0, (Date.now() - t) / 1000);
@@ -116,6 +133,29 @@ function relTime(ts, long = false) {
   return long ? `${d} d ago` : `${d}d`;
 }
 
+const minutesOf = (t) => {
+  const m = String(t ?? '').match(/^(\d{1,2}):(\d{2})/);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+
+/** True while `now` is inside a {start, end} window; windows may cross midnight. */
+function inQuietHours(q, now = new Date()) {
+  if (!isObj(q)) return false;
+  const s = minutesOf(q.start);
+  const e = minutesOf(q.end);
+  if (s === null || e === null || s === e) return false;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  return s < e ? cur >= s && cur < e : cur >= s || cur < e;
+}
+
+function personInZone(person, zoneId, states) {
+  if (!person || !zoneId) return false;
+  const where = String(person.state).toLowerCase();
+  if (zoneId === 'zone.home') return where === 'home';
+  const names = [zoneId.split('.')[1], states[zoneId]?.attributes?.friendly_name].filter(Boolean);
+  return names.some((n) => String(n).toLowerCase() === where);
+}
+
 /** Snooze option -> epoch ms it ends, or null if the option is invalid. */
 function snoozeEnd(opt, now = new Date()) {
   if (!opt) return null;
@@ -126,10 +166,10 @@ function snoozeEnd(opt, now = new Date()) {
     d.setHours(24, 0, 0, 0);
     return d.getTime();
   }
-  const m = typeof opt.until === 'string' && opt.until.match(/^(\d{1,2}):(\d{2})/);
-  if (m) {
+  const t = minutesOf(opt.until);
+  if (t !== null) {
     const d = new Date(now);
-    d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    d.setHours(Math.floor(t / 60), t % 60, 0, 0);
     if (d <= now) d.setDate(d.getDate() + 1);
     return d.getTime();
   }
@@ -143,16 +183,15 @@ const normalizeSnooze = (list) =>
 
 const normalizeGroups = (groups) => {
   const map = new Map();
-  if (Array.isArray(groups)) groups.forEach((g) => g && g.id && map.set(String(g.id), { ...g, id: String(g.id) }));
-  else if (groups && typeof groups === 'object')
-    Object.entries(groups).forEach(([id, g]) => g && map.set(id, { ...g, id }));
+  if (Array.isArray(groups)) groups.forEach((g) => isObj(g) && g.id && map.set(String(g.id), { ...g, id: String(g.id) }));
+  else if (isObj(groups)) Object.entries(groups).forEach(([id, g]) => isObj(g) && map.set(id, { ...g, id }));
   return map;
 };
 
 function readStore(key) {
   try {
     const obj = JSON.parse(window.localStorage.getItem(key) || '{}');
-    return obj && typeof obj === 'object' ? obj : {};
+    return isObj(obj) ? obj : {};
   } catch (_) {
     return {};
   }
@@ -165,6 +204,98 @@ function writeStore(key, obj) {
     /* blocked storage: state lasts until reload */
   }
 }
+
+// ---------- templates ----------
+
+const currentDashboard = () => window.location.pathname.split('/')[1] || 'lovelace';
+const dashKey = (d) => (!d || d === 'lovelace' ? 'lovelace' : String(d));
+
+/** "dashboard/name", {dashboard, name}, or a bare name (= this dashboard). */
+function parseTemplateRef(ref) {
+  if (isObj(ref)) return ref.name ? { dashboard: dashKey(ref.dashboard || currentDashboard()), name: String(ref.name) } : null;
+  const s = String(ref ?? '').trim();
+  if (!s) return null;
+  const i = s.lastIndexOf('/');
+  return i > 0 ? { dashboard: dashKey(s.slice(0, i)), name: s.slice(i + 1) } : { dashboard: dashKey(currentDashboard()), name: s };
+}
+
+function findTemplateCards(node, out = []) {
+  if (Array.isArray(node)) node.forEach((n) => findTemplateCards(n, out));
+  else if (isObj(node)) {
+    if (node.type === CARD_TYPE && node.template_name) out.push(node);
+    Object.values(node).forEach((v) => v && typeof v === 'object' && findTemplateCards(v, out));
+  }
+  return out;
+}
+
+/** Shared cache of dashboard configs, refreshed when a dashboard is saved. */
+const TemplateStore = {
+  configs: new Map(),
+  listeners: new Set(),
+  watching: false,
+
+  config(hass, dash) {
+    if (!this.configs.has(dash)) {
+      const p = hass.callWS({ type: 'lovelace/config', url_path: dash === 'lovelace' ? null : dash });
+      p.catch(() => this.configs.delete(dash));
+      this.configs.set(dash, p);
+    }
+    return this.configs.get(dash);
+  },
+
+  watch(hass) {
+    if (this.watching || !hass?.connection?.subscribeEvents) return;
+    this.watching = true;
+    hass.connection
+      .subscribeEvents((ev) => {
+        const dash = dashKey(ev?.data?.url_path);
+        this.configs.delete(dash);
+        this.listeners.forEach((fn) => fn(dash));
+      }, 'lovelace_updated')
+      .catch(() => {
+        this.watching = false;
+      });
+  },
+
+  async resolve(hass, ref) {
+    const r = parseTemplateRef(ref);
+    if (!r) throw new Error(`invalid template reference "${ref}"`);
+    const cfg = await this.config(hass, r.dashboard);
+    const card = findTemplateCards(cfg).find((c) => c.template_name === r.name);
+    if (!card) throw new Error(`template "${r.name}" not found on dashboard "${r.dashboard}"`);
+    return {
+      ref: `${r.dashboard}/${r.name}`,
+      dashboard: r.dashboard,
+      name: r.name,
+      groups: [...normalizeGroups(card.groups).values()],
+      alerts: toList(card.alerts).filter(isObj),
+      snooze_options: card.snooze_options,
+    };
+  },
+
+  async discover(hass) {
+    let dashes = [{ url_path: 'lovelace', title: 'Overview' }];
+    try {
+      dashes = dashes.concat(await hass.callWS({ type: 'lovelace/dashboards/list' }));
+    } catch (_) {
+      /* non-admin users can't list dashboards */
+    }
+    const out = [];
+    await Promise.all(
+      dashes.map(async (d) => {
+        try {
+          const key = dashKey(d.url_path);
+          findTemplateCards(await this.config(hass, key)).forEach((c) =>
+            out.push({ value: `${key}/${c.template_name}`, label: `${c.template_name} · ${d.title || key}` })
+          );
+        } catch (_) {
+          /* skip dashboards we can't read */
+        }
+      })
+    );
+    return out.sort((a, b) => a.label.localeCompare(b.label));
+  },
+};
 
 // ---------- card styles ----------
 
@@ -222,6 +353,7 @@ const STYLE = `
 .hbtn[hidden] { display: none; }
 .hbtn.confirm { background: var(--nsc-critical); color: #fff; }
 .hbtn ha-icon { --mdc-icon-size: 16px; }
+.htitle .hbtn { font-weight: 600; }
 
 .scroller.scroll { overflow-y: auto; overscroll-behavior: contain; padding: 2px 2px 6px; margin: -2px -2px 0; }
 .stack { position: relative; transition: height var(--nsc-duration) var(--nsc-ease); }
@@ -249,10 +381,14 @@ const STYLE = `
 .item.dragging { transition: height var(--nsc-duration) var(--nsc-ease); }
 .item.entering, .item.leaving, .item.hiddenstack { opacity: 0; }
 .item.leaving, .item.hiddenstack { pointer-events: none; }
-.no-anim, .no-anim .item { transition: none !important; }
+.no-anim, .no-anim .item, .no-anim .gh { transition: none !important; }
 
 .content { padding: 12px; transition: opacity 200ms ease; }
 .item.behind .content { opacity: 0; }
+.item.clipped .content {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(var(--nsc-clip) - 30px), transparent calc(var(--nsc-clip) - 6px));
+  mask-image: linear-gradient(to bottom, #000 calc(var(--nsc-clip) - 30px), transparent calc(var(--nsc-clip) - 6px));
+}
 .row { display: flex; align-items: flex-start; gap: 12px; }
 .icon {
   flex: 0 0 auto; width: 38px; height: 38px; border-radius: 50%;
@@ -305,6 +441,23 @@ const STYLE = `
 .snz .act.cancel { padding: 7px; }
 .act:active, .ib:active, .hbtn:active { transform: scale(0.96); }
 
+.gh {
+  --nsc-accent: var(--nsc-info);
+  position: absolute; top: 0; left: 0; right: 0; box-sizing: border-box;
+  display: flex; align-items: center; gap: 8px; padding: 0 4px; min-height: 28px;
+  transform: translate3d(0, var(--y, 0px), 0);
+  transition: transform var(--nsc-duration) var(--nsc-ease), opacity 250ms ease;
+}
+.gh.off { opacity: 0; pointer-events: none; }
+.gh .hbtn.fold { padding: 4px 6px; }
+.item.ingroup .grp { display: none; }
+.gh .gdot { width: 8px; height: 8px; border-radius: 50%; background: var(--nsc-accent); flex: 0 0 auto; }
+.gh .gname {
+  flex: 1 1 auto; min-width: 0; cursor: pointer;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--nsc-accent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 .empty {
   padding: 14px; text-align: center; font-size: 13px; color: var(--secondary-text-color);
   border-radius: var(--nsc-radius); border: var(--nsc-border); background: var(--nsc-bg);
@@ -319,19 +472,21 @@ class NotificationStackCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
-    this._expanded = false;
     this._items = new Map();
+    this._heads = new Map();
     this._alerts = [];
+    this._blocks = [];
     this._pn = {};
     this._pnSub = null;
     this._pnFailed = false;
     this._sig = '';
-    this._confirming = null;
-    this._snoozeOpen = null;
     this._snoozedCount = 0;
     this._drag = null;
     this._suppressClick = false;
     this._lastW = 0;
+    this._tplListener = (dash) => {
+      if (this._tplData?.some((t) => t.dashboard === dash) || this._tplErrors?.length) this._loadTemplates();
+    };
   }
 
   static getConfigElement() {
@@ -351,33 +506,45 @@ class NotificationStackCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (!config || typeof config !== 'object') throw new Error('Invalid configuration');
+    if (!isObj(config)) throw new Error('Invalid configuration');
     this._raw = config;
-    this._config = {
-      ...DEFAULTS,
-      ...config,
-      alerts: toList(config.alerts).filter((r) => r && typeof r === 'object'),
-    };
-    const snooze = normalizeSnooze(this._config.snooze_options);
-    this._snoozeOptions = snooze.length ? snooze : DEFAULT_SNOOZE;
-    this._groups = normalizeGroups(config.groups);
-    const key = this._config.storage_key || 'default';
-    this._dismissKey = `nsc-dismissed:${key}`;
-    this._snoozeKey = `nsc-snoozed:${key}`;
-    this._dismissed = readStore(this._dismissKey);
-    this._snoozed = readStore(this._snoozeKey);
+    const cfg = { ...DEFAULTS, ...config };
+    // Older option names keep working.
+    cfg.when_empty = oneOf(config.when_empty, EMPTY_MODES, config.hide_when_empty === false ? 'show' : 'hide');
+    cfg.snoozed_position = oneOf(
+      config.snoozed_position,
+      SNOOZED_POSITIONS,
+      config.show_snoozed === false ? 'hidden' : 'buttons'
+    );
+    cfg.count_position = oneOf(config.count_position, COUNT_POSITIONS, 'right');
+    this._config = cfg;
+
+    const key = cfg.storage_key || 'default';
+    this._keys = { dismissed: `nsc-dismissed:${key}`, snoozed: `nsc-snoozed:${key}`, height: `nsc-height:${key}` };
+    this._dismissed = readStore(this._keys.dismissed);
+    this._snoozed = readStore(this._keys.snoozed);
+    this._reserveH = Number(readStore(this._keys.height).h) || 0;
+
+    this._tplData = [];
+    this._tplErrors = [];
+    this._tplRequested = false;
+    this._rebuildDefinition();
+
     this._expanded = false;
+    this._openGroups = new Set();
     this._snoozeOpen = null;
     this._confirming = null;
     this._sig = '';
     this._build();
     this._maybeSubscribe();
+    this._loadTemplates();
     this._update();
   }
 
   set hass(hass) {
     this._hass = hass;
     this._maybeSubscribe();
+    if (!this._tplRequested) this._loadTemplates();
     this._update();
   }
 
@@ -387,9 +554,8 @@ class NotificationStackCard extends HTMLElement {
 
   connectedCallback() {
     this._maybeSubscribe();
-    if (!this._timer) {
-      this._timer = setInterval(() => this._refresh(), 60000);
-    }
+    TemplateStore.listeners.add(this._tplListener);
+    if (!this._timer) this._timer = setInterval(() => this._refresh(), 60000);
     if (this._stack) requestAnimationFrame(() => this._layout());
   }
 
@@ -397,6 +563,7 @@ class NotificationStackCard extends HTMLElement {
     clearInterval(this._timer);
     this._timer = null;
     [this._acTimer, this._confirmTimer, this._wakeTimer].forEach(clearTimeout);
+    TemplateStore.listeners.delete(this._tplListener);
     if (this._pnSub) {
       this._pnSub.then((unsub) => unsub && unsub()).catch(() => {});
       this._pnSub = null;
@@ -406,6 +573,52 @@ class NotificationStackCard extends HTMLElement {
   _refresh() {
     this._sig = '';
     this._update();
+  }
+
+  // ---------- definition (templates + local) ----------
+
+  _loadTemplates() {
+    if (!this._hass?.callWS) return;
+    this._tplRequested = true;
+    const own = this._config.template_name;
+    const refs = toList(this._config.templates).filter((r) => {
+      const p = parseTemplateRef(r);
+      return p && !(own && p.name === own && p.dashboard === dashKey(currentDashboard()));
+    });
+    if (!refs.length) return;
+    TemplateStore.watch(this._hass);
+    const token = (this._tplToken = (this._tplToken || 0) + 1);
+    Promise.all(
+      refs.map((r) => TemplateStore.resolve(this._hass, r).catch((e) => ({ error: String(e?.message || e), ref: r })))
+    ).then((res) => {
+      if (token !== this._tplToken) return;
+      this._tplData = res.filter((x) => !x.error);
+      this._tplErrors = res.filter((x) => x.error);
+      this._tplErrors.forEach((e) => console.warn(`notification-stack-card: ${e.error}`));
+      this._rebuildDefinition();
+      this._refresh();
+    });
+  }
+
+  /** Merge template groups/alerts/snooze options with this card's own; the card's own win. */
+  _rebuildDefinition() {
+    const groups = new Map();
+    const fromTemplates = [];
+    let tplSnooze;
+    this._tplData.forEach((t, ti) => {
+      t.groups.forEach((g) => groups.set(g.id, g));
+      t.alerts.forEach((r, i) => fromTemplates.push({ ...r, __id: r.id || `t${ti}r${i}` }));
+      if (!tplSnooze && normalizeSnooze(t.snooze_options).length) tplSnooze = normalizeSnooze(t.snooze_options);
+    });
+    normalizeGroups(this._raw.groups).forEach((g, id) => groups.set(id, g));
+    const local = toList(this._raw.alerts)
+      .filter(isObj)
+      .map((r, i) => ({ ...r, __id: r.id || `r${i}` }));
+    const localIds = new Set(local.map((r) => r.__id));
+    this._groups = groups;
+    this._rules = [...fromTemplates.filter((r) => !localIds.has(r.__id)), ...local];
+    const own = normalizeSnooze(this._raw.snooze_options);
+    this._snoozeOptions = own.length ? own : tplSnooze || DEFAULT_SNOOZE;
   }
 
   // ---------- persistent notifications ----------
@@ -462,6 +675,33 @@ class NotificationStackCard extends HTMLElement {
     });
   }
 
+  _viewerPerson() {
+    const uid = this._hass.user?.id;
+    if (!uid) return '';
+    if (this._viewer?.uid !== uid) {
+      const id = Object.keys(this._hass.states).find(
+        (e) => e.startsWith('person.') && this._hass.states[e].attributes.user_id === uid
+      );
+      this._viewer = { uid, id: id || '' };
+    }
+    return this._viewer.id;
+  }
+
+  /** Zone limit for a group. With no known person the alert shows rather than silently hiding. */
+  _zoneAllows(g) {
+    const zones = toList(g?.zones);
+    if (!zones.length) return true;
+    const person = this._hass.states[g.zone_person || this._config.zone_person || this._viewerPerson()];
+    if (!person) return true;
+    const inside = zones.some((z) => personInZone(person, z, this._hass.states));
+    return g.zone_mode === 'outside' ? !inside : inside;
+  }
+
+  _quietBlocks(g, severity, now) {
+    if (!g || !inQuietHours(g.quiet_hours, now)) return false;
+    return !(severity === 'critical' && g.quiet_hours.allow_critical !== false);
+  }
+
   _fill(tpl, ctx) {
     const { so } = ctx;
     return String(tpl ?? '').replace(/\{(\w+)(?::([^}]+))?\}/g, (m, key, arg) => {
@@ -505,6 +745,7 @@ class NotificationStackCard extends HTMLElement {
       tap_action: rule.tap_action ?? g?.tap_action,
       actions: toList(rule.actions ?? g?.actions),
       snooze_options: rule.snooze_options ?? g?.snooze_options,
+      group: g ? g.id : '',
       groupName: g && g.show_name !== false ? g.name || '' : '',
     };
   }
@@ -512,15 +753,21 @@ class NotificationStackCard extends HTMLElement {
   _computeAlerts() {
     const hass = this._hass;
     const cfg = this._config;
+    const now = new Date();
+    const filter = toList(cfg.show_groups).map(String);
+    const listed = (g) => !filter.length || (g ? filter.includes(g.id) : cfg.show_ungrouped !== false);
     const out = [];
 
-    cfg.alerts.forEach((rule, idx) => {
+    for (const rule of this._rules) {
       const g = rule.group ? this._groups.get(String(rule.group)) : undefined;
-      if (g?.conditions && !this._conditionsPass(g.conditions)) return;
-      if (rule.conditions && !this._conditionsPass(rule.conditions)) return;
+      if (!listed(g) || !this._zoneAllows(g)) continue;
+      if (g?.conditions && !this._conditionsPass(g.conditions)) continue;
+      if (rule.conditions && !this._conditionsPass(rule.conditions)) continue;
+      const base = this._inherit(rule, g);
+      if (this._quietBlocks(g, base.severity, now)) continue;
 
       const hits = [];
-      const ents = rule.entities ? toList(rule.entities) : rule.entity ? [rule.entity] : [];
+      const ents = rule.entities ? toList(rule.entities) : toList(rule.entity);
       for (const e of ents) {
         const ent = typeof e === 'string' ? { entity: e } : e || {};
         const so = ent.entity && hass.states[ent.entity];
@@ -528,10 +775,8 @@ class NotificationStackCard extends HTMLElement {
         if (!this._test(rule.attribute ? so.attributes[rule.attribute] : so.state, rule)) continue;
         hits.push({ ent, so, name: ent.name || so.attributes.friendly_name || ent.entity });
       }
-      if (!hits.length) return;
+      if (!hits.length) continue;
 
-      const base = this._inherit(rule, g);
-      const ruleId = rule.id || `r${idx}`;
       const make = (id, list) => {
         const lead = list[0];
         const multi = list.length > 1;
@@ -554,16 +799,17 @@ class NotificationStackCard extends HTMLElement {
 
       if (rule.combine) {
         hits.sort((a, b) => timeOf(b.so.last_changed) - timeOf(a.so.last_changed));
-        out.push(make(`${ruleId}:combined`, hits));
+        out.push(make(`${rule.__id}:combined`, hits));
       } else {
-        hits.forEach((h) => out.push(make(`${ruleId}:${h.ent.entity}`, [h])));
+        hits.forEach((h) => out.push(make(`${rule.__id}:${h.ent.entity}`, [h])));
       }
-    });
+    }
 
     if (cfg.persistent_notifications) {
       const g = cfg.persistent_group ? this._groups.get(String(cfg.persistent_group)) : undefined;
       const base = this._inherit({ severity: this._raw.persistent_severity, icon: this._raw.persistent_icon }, g);
-      for (const n of Object.values(this._pn)) {
+      const allowed = listed(g) && this._zoneAllows(g) && !this._quietBlocks(g, base.severity, now);
+      for (const n of allowed ? Object.values(this._pn) : []) {
         if (!n || !n.notification_id) continue;
         out.push({
           ...base,
@@ -581,7 +827,7 @@ class NotificationStackCard extends HTMLElement {
     }
 
     // Dismissed / snoozed: hidden while every current token was already seen.
-    const now = Date.now();
+    const nowMs = now.getTime();
     const active = new Map(out.map((a) => [a.id, a]));
     const covered = (seen, a) => Array.isArray(seen) && a.tokens.every((t) => seen.includes(t));
     let dChanged = false;
@@ -596,13 +842,13 @@ class NotificationStackCard extends HTMLElement {
     for (const id of Object.keys(this._snoozed)) {
       const s = this._snoozed[id];
       const a = active.get(id);
-      if (!s || !(s.until > now) || (a && !covered(s.tokens, a))) {
+      if (!s || !(s.until > nowMs) || (a && !covered(s.tokens, a))) {
         delete this._snoozed[id];
         sChanged = true;
       }
     }
-    if (dChanged) writeStore(this._dismissKey, this._dismissed);
-    if (sChanged) writeStore(this._snoozeKey, this._snoozed);
+    if (dChanged) writeStore(this._keys.dismissed, this._dismissed);
+    if (sChanged) writeStore(this._keys.snoozed, this._snoozed);
 
     let snoozed = 0;
     const visible = out.filter((a) => {
@@ -626,6 +872,28 @@ class NotificationStackCard extends HTMLElement {
     return visible;
   }
 
+  /** Expanded-list blocks: a single alert, or a group's alerts folded into a sub-stack. */
+  _makeBlocks(alerts) {
+    if (this._config.group_stacks === false) return alerts.map((a) => ({ alerts: [a] }));
+    const counts = new Map();
+    alerts.forEach((a) => a.group && counts.set(a.group, (counts.get(a.group) || 0) + 1));
+    const blocks = [];
+    const byGroup = new Map();
+    for (const a of alerts) {
+      const g = a.group && this._groups.get(a.group);
+      if (g && g.stack !== false && counts.get(a.group) > 1) {
+        let b = byGroup.get(a.group);
+        if (!b) {
+          b = { gid: a.group, g, alerts: [] };
+          byGroup.set(a.group, b);
+          blocks.push(b);
+        }
+        b.alerts.push(a);
+      } else blocks.push({ alerts: [a] });
+    }
+    return blocks;
+  }
+
   _scheduleWake() {
     clearTimeout(this._wakeTimer);
     const ends = Object.values(this._snoozed).map((s) => s.until).filter(Number.isFinite);
@@ -637,15 +905,13 @@ class NotificationStackCard extends HTMLElement {
   // ---------- DOM ----------
 
   _build() {
+    const cfg = this._config;
     const root = this.shadowRoot;
     root.innerHTML = `
       <style>${STYLE}</style>
-      <style>${this._config.styles || ''}</style>
+      <style>${cfg.styles || ''}</style>
       <div class="wrap">
-        <div class="header" hidden>
-          <div class="htitle"><span class="title"></span><span class="count"></span></div>
-          <div class="hbtns"></div>
-        </div>
+        <div class="header" hidden><div class="htitle"></div><div class="hbtns"></div></div>
         <div class="scroller"><div class="stack no-anim"></div></div>
         <div class="footer" hidden></div>
         <div class="empty" hidden></div>
@@ -653,48 +919,59 @@ class NotificationStackCard extends HTMLElement {
     const $ = (s) => root.querySelector(s);
     this._wrap = $('.wrap');
     this._header = $('.header');
-    this._hbtns = $('.hbtns');
     this._footer = $('.footer');
-    this._titleEl = $('.htitle .title');
-    this._countEl = $('.count');
     this._scroller = $('.scroller');
     this._stack = $('.stack');
     this._emptyEl = $('.empty');
     this._items = new Map();
+    this._heads = new Map();
 
-    // Header controls live in one container that moves between header and footer.
-    this._ctrls = document.createElement('div');
-    this._ctrls.style.display = 'contents';
-    this._ctrls.innerHTML = `
-      <button class="hbtn snzc" hidden><ha-icon icon="mdi:bell-sleep"></ha-icon><span></span></button>
-      <button class="hbtn clear" hidden></button>
-      <button class="hbtn less" hidden><ha-icon icon="mdi:chevron-up"></ha-icon><span>Show less</span></button>`;
-    this._snzcBtn = this._ctrls.querySelector('.snzc');
-    this._clearBtn = this._ctrls.querySelector('.clear');
-    this._lessBtn = this._ctrls.querySelector('.less');
+    const make = (html) => {
+      const t = document.createElement('template');
+      t.innerHTML = html.trim();
+      return t.content.firstChild;
+    };
+    this._titleEl = make('<span class="title"></span>');
+    this._countEl = make('<span class="count"></span>');
+    this._snzcBtn = make('<button class="hbtn snzc" hidden><ha-icon icon="mdi:bell-sleep"></ha-icon><span></span></button>');
+    this._clearBtn = make('<button class="hbtn clear" hidden></button>');
+    this._lessBtn = make('<button class="hbtn less" hidden><ha-icon icon="mdi:chevron-up"></ha-icon><span>Show less</span></button>');
 
-    const cfg = this._config;
-    const align = ['left', 'center', 'right'].includes(cfg.header_align) ? cfg.header_align : 'left';
-    this._header.classList.add(`al-${align}`);
-    this._footer.classList.add(`al-${align}`);
-    const pl = cssSize(cfg.header_padding_left);
-    const pr = cssSize(cfg.header_padding_right);
+    // Header pieces are placed once per config.
+    const titleRow = $('.htitle');
+    const showHeader = cfg.show_header !== false;
+    const snz = cfg.snoozed_position;
+    if (showHeader && snz === 'before_title') titleRow.appendChild(this._snzcBtn);
+    if (cfg.count_position === 'left') titleRow.appendChild(this._countEl);
+    titleRow.appendChild(this._titleEl);
+    if (cfg.count_position === 'right') titleRow.appendChild(this._countEl);
+    if (showHeader && snz === 'after_title') titleRow.appendChild(this._snzcBtn);
+    const ctrlHost = showHeader ? $('.hbtns') : this._footer;
+    if ((!showHeader && snz !== 'hidden') || snz === 'buttons') ctrlHost.appendChild(this._snzcBtn);
+    ctrlHost.append(this._clearBtn, this._lessBtn);
+
+    const align = oneOf(cfg.header_align, ['left', 'center', 'right'], 'left');
     [this._header, this._footer].forEach((el) => {
-      el.style.paddingLeft = pl;
-      el.style.paddingRight = pr;
+      el.classList.add(`al-${align}`);
+      el.style.paddingLeft = cssSize(cfg.header_padding_left);
+      el.style.paddingRight = cssSize(cfg.header_padding_right);
     });
-    this._wrap.style.width = cssSize(cfg.width);
-    this._wrap.style.marginLeft = cfg.card_align === 'left' ? '0' : 'auto';
-    this._wrap.style.marginRight = cfg.card_align === 'right' ? '0' : 'auto';
-    if (!cssSize(cfg.width)) this._wrap.style.margin = '0';
+    const width = cssSize(cfg.width);
+    this._wrap.style.width = width;
+    this._wrap.style.marginLeft = width && cfg.card_align !== 'left' ? 'auto' : '0';
+    this._wrap.style.marginRight = width && cfg.card_align !== 'right' ? 'auto' : '0';
     this.style.setProperty('--nsc-lines', String(Number(cfg.message_lines) || 2));
 
-    root.querySelector('.htitle').addEventListener('click', () => {
+    titleRow.addEventListener('click', (ev) => {
+      if (ev.target.closest('.snzc')) return;
       if (this._alerts.length > 1) this._setExpanded(!this._expanded, true);
     });
     this._lessBtn.addEventListener('click', () => this._setExpanded(false, true));
     this._clearBtn.addEventListener('click', () => this._onClearAll());
-    this._snzcBtn.addEventListener('click', () => this._onUnsnoozeAll());
+    this._snzcBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      this._onUnsnoozeAll();
+    });
 
     this._stack.addEventListener('click', (ev) => this._onClick(ev));
     this._stack.addEventListener('pointerdown', (ev) => this._onPointerDown(ev));
@@ -720,10 +997,11 @@ class NotificationStackCard extends HTMLElement {
     const alerts = this._computeAlerts();
     const sig =
       alerts.map((a) => `${a.id}|${a.ts}|${a.severity}|${a.icon}|${a.color}|${a.title}|${a.message}`).join('§') +
-      `#${this._expanded}#${this._confirming || ''}#${this._snoozeOpen || ''}#${this._snoozedCount}`;
+      `#${this._expanded}#${[...this._openGroups].join(',')}#${this._confirming || ''}#${this._snoozeOpen || ''}#${this._snoozedCount}`;
     if (sig === this._sig) return;
     this._sig = sig;
     this._alerts = alerts;
+    this._blocks = this._makeBlocks(alerts);
     this._render();
   }
 
@@ -733,21 +1011,25 @@ class NotificationStackCard extends HTMLElement {
     const n = alerts.length;
     if (n <= 1 && this._expanded) {
       this._expanded = false;
+      this._openGroups.clear();
       clearTimeout(this._acTimer);
     }
-    const snoozeChip = cfg.show_snoozed && this._snoozedCount > 0;
-    const empty = n === 0;
-    this.hidden = empty && !snoozeChip && cfg.hide_when_empty && !this.preview;
+    const live = new Set(this._blocks.filter((b) => b.gid).map((b) => b.gid));
+    [...this._openGroups].forEach((gid) => !live.has(gid) && this._openGroups.delete(gid));
 
-    // Header / footer controls
-    const showHeader = cfg.show_header !== false && (cfg.title || this._expanded || snoozeChip) && (!empty || snoozeChip);
-    this._header.hidden = !showHeader;
-    const ctrlHost = cfg.show_header !== false ? this._hbtns : this._footer;
-    if (this._ctrls.parentNode !== ctrlHost) ctrlHost.appendChild(this._ctrls);
+    const chip = cfg.snoozed_position !== 'hidden' && this._snoozedCount > 0;
+    const empty = n === 0 && !chip;
+    const preview = !!this.preview;
+    this.hidden = empty && cfg.when_empty === 'hide' && !preview;
+    this._wrap.style.visibility = empty && cfg.when_empty === 'reserve' && !preview ? 'hidden' : '';
+
+    // Header and footer
+    const showHeader = cfg.show_header !== false;
+    this._header.hidden = !showHeader || empty || !(cfg.title || this._expanded || chip);
+    this._footer.hidden = showHeader || !(this._expanded || chip);
     this._titleEl.textContent = cfg.title || (this._expanded ? 'Notifications' : '');
     this._countEl.textContent = n > 1 ? String(n) : '';
-
-    this._snzcBtn.hidden = !snoozeChip;
+    this._snzcBtn.hidden = !chip;
     this._snzcBtn.classList.toggle('confirm', this._confirming === 'unsnooze');
     this._snzcBtn.querySelector('span').textContent =
       this._confirming === 'unsnooze' ? 'Unsnooze all?' : String(this._snoozedCount);
@@ -755,19 +1037,19 @@ class NotificationStackCard extends HTMLElement {
     this._clearBtn.hidden = !(this._expanded && alerts.some((a) => a.dismissible));
     this._clearBtn.textContent = this._confirming === 'clear' ? 'Clear all?' : 'Clear';
     this._clearBtn.classList.toggle('confirm', this._confirming === 'clear');
-    this._footer.hidden = cfg.show_header !== false || !(this._expanded || snoozeChip);
 
-    // Height limit applies while expanded
     const maxH = this._expanded ? cssSize(cfg.height) : '';
     this._scroller.style.maxHeight = maxH;
     this._scroller.classList.toggle('scroll', !!maxH);
 
-    // Empty state
-    const showEmpty = empty && (!cfg.hide_when_empty || this.preview);
+    const showEmpty = n === 0 && (cfg.when_empty === 'show' || preview);
     this._emptyEl.hidden = !showEmpty;
-    this._emptyEl.textContent = cfg.hide_when_empty && this.preview ? `${cfg.empty_text} (hidden when empty)` : cfg.empty_text;
+    this._emptyEl.textContent =
+      preview && cfg.when_empty !== 'show'
+        ? `${cfg.empty_text} (${cfg.when_empty === 'reserve' ? 'invisible, keeps its space' : 'hidden'} when empty)`
+        : cfg.empty_text;
 
-    // Items (keyed)
+    // Alert items (keyed)
     const seen = new Set();
     for (const a of alerts) {
       let el = this._items.get(a.id);
@@ -794,6 +1076,34 @@ class NotificationStackCard extends HTMLElement {
       this._items.delete(id);
       el.classList.add('leaving');
       setTimeout(() => el.remove(), 320);
+    }
+
+    // Sub-stack headers (keyed by group)
+    const heads = new Set();
+    for (const b of this._blocks) {
+      if (!b.gid) continue;
+      let el = this._heads.get(b.gid);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'gh off';
+        el.dataset.gid = b.gid;
+        this._stack.appendChild(el);
+        this._heads.set(b.gid, el);
+      }
+      const color = cssColor(b.g.color);
+      if (color) el.style.setProperty('--nsc-accent', color);
+      else el.style.removeProperty('--nsc-accent');
+      const html = `<span class="gdot"></span><span class="gname" data-gless>${esc(b.g.name || b.gid)}</span><span class="count">${b.alerts.length}</span><button class="hbtn fold" data-gless aria-label="Fold ${esc(b.g.name || b.gid)}"><ha-icon icon="mdi:chevron-up"></ha-icon></button>`;
+      if (el._html !== html) {
+        el.innerHTML = html;
+        el._html = html;
+      }
+      heads.add(b.gid);
+    }
+    for (const [gid, el] of this._heads) {
+      if (heads.has(gid)) continue;
+      this._heads.delete(gid);
+      el.remove();
     }
 
     requestAnimationFrame(() => this._layout());
@@ -854,49 +1164,117 @@ class NotificationStackCard extends HTMLElement {
     </div>`;
   }
 
+  // ---------- layout ----------
+
   _layout() {
     if (!this._stack) return;
-    const els = this._alerts.map((a) => this._items.get(a.id)).filter(Boolean);
-    const n = els.length;
-    const heights = els.map((el) => (el.firstElementChild ? el.firstElementChild.offsetHeight : 0));
+    const cfg = this._config;
+    const alerts = this._alerts;
+    const n = alerts.length;
+    const H = new Map();
+    alerts.forEach((a) => {
+      const el = this._items.get(a.id);
+      H.set(a.id, el?.firstElementChild ? el.firstElementChild.offsetHeight : 0);
+    });
     const gap = 8;
-    const peek = Number(this._config.peek_offset) || 10;
-    const maxPeek = Math.max(0, Number(this._config.max_peek) || 0);
-    const collapsed = !this._expanded && n > 1;
+    const peek = Number(cfg.peek_offset) || 10;
+    const maxPeek = Math.max(0, Number(cfg.max_peek) || 0);
+    let z = 1000;
     let total = 0;
+    this._closedOf = new Map();
 
-    if (!collapsed) {
-      let y = 0;
-      els.forEach((el, i) => {
-        this._place(el, { y, s: 1, h: heights[i], z: n - i, behind: false, hide: false });
-        y += heights[i] + gap;
+    const fold = (list, y, limit, owner) => {
+      // A collapsed stack: top card plus up to `maxPeek` cards peeking below it.
+      let h0 = H.get(list[0].id);
+      let peekN = Math.min(list.length - 1, maxPeek);
+      let off = peek;
+      let clip = 0;
+      if (limit) {
+        if (peekN && h0 + peekN * off > limit) off = Math.max(6, Math.min(off, Math.floor((limit - h0) / peekN)));
+        while (peekN > 1 && h0 + peekN * off > limit) peekN -= 1;
+        if (h0 + peekN * off > limit) {
+          h0 = Math.max(48, limit - peekN * off);
+          clip = h0;
+        }
+      }
+      list.forEach((a, i) => {
+        const depth = Math.min(i, peekN);
+        this._place(this._items.get(a.id), {
+          y: y + depth * off,
+          s: 1 - depth * 0.05,
+          h: h0,
+          z: z--,
+          behind: i > 0,
+          hide: i > peekN,
+          clip: i === 0 ? clip : 0,
+        });
+        if (owner) this._closedOf.set(a.id, { owner, top: i === 0 });
       });
-      total = n ? y - gap : 0;
+      return h0 + peekN * off;
+    };
+
+    const list = (items, y, inGroup = false) => {
+      items.forEach((a) => {
+        this._place(this._items.get(a.id), { y, s: 1, h: H.get(a.id), z: z--, behind: false, hide: false, clip: 0, inGroup });
+        y += H.get(a.id) + gap;
+      });
+      return y;
+    };
+
+    this._heads.forEach((el) => this._placeHead(el, 0, false));
+
+    if (n === 0) {
+      total = cfg.when_empty === 'reserve' && !this.preview ? this._reserveH || pxNumber(cfg.collapsed_height) || 76 : 0;
+    } else if (!this._expanded) {
+      total = n > 1 ? fold(alerts, 0, pxNumber(cfg.collapsed_height), 'main') : list(alerts, 0) - gap;
+      if (Math.abs(total - this._reserveH) > 1) {
+        this._reserveH = total;
+        writeStore(this._keys.height, { h: total });
+      }
     } else {
-      const h0 = heights[0];
-      els.forEach((el, i) => {
-        const depth = Math.min(i, maxPeek);
-        this._place(el, { y: depth * peek, s: 1 - depth * 0.05, h: h0, z: n - i, behind: i > 0, hide: i > maxPeek });
-      });
-      total = h0 + Math.min(n - 1, maxPeek) * peek;
+      let y = 0;
+      for (const b of this._blocks) {
+        if (!b.gid) {
+          y = list(b.alerts, y);
+          continue;
+        }
+        const head = this._heads.get(b.gid);
+        if (this._openGroups.has(b.gid)) {
+          this._placeHead(head, y, true);
+          y = list(b.alerts, y + (head?.offsetHeight || 28) + 4, true);
+        } else {
+          y += fold(b.alerts, y, 0, b.gid) + gap;
+        }
+      }
+      total = y - gap;
     }
 
-    this._stack.style.height = `${total}px`;
+    this._stack.style.height = `${Math.max(0, total)}px`;
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
-        els.forEach((el) => el.classList.remove('entering'));
+        this._items.forEach((el) => el.classList.remove('entering'));
         this._stack.classList.remove('no-anim');
       })
     );
   }
 
   _place(el, p) {
+    if (!el) return;
     el.style.setProperty('--y', `${p.y}px`);
     el.style.setProperty('--s', String(p.s));
     el.style.height = `${p.h}px`;
     el.style.zIndex = String(p.z);
     el.classList.toggle('behind', p.behind);
     el.classList.toggle('hiddenstack', p.hide);
+    el.classList.toggle('clipped', !!p.clip);
+    el.classList.toggle('ingroup', !!p.inGroup);
+    if (p.clip) el.style.setProperty('--nsc-clip', `${p.clip}px`);
+  }
+
+  _placeHead(el, y, on) {
+    if (!el) return;
+    el.style.setProperty('--y', `${y}px`);
+    el.classList.toggle('off', !on);
   }
 
   // ---------- interaction ----------
@@ -905,22 +1283,30 @@ class NotificationStackCard extends HTMLElement {
     return el ? this._alerts.find((a) => a.id === el.dataset.id) : undefined;
   }
 
-  _isCollapsed() {
-    return !this._expanded && this._alerts.length > 1;
+  /** If the alert sits in a folded stack: whether it is on top, and how to open that stack. */
+  _foldOf(alert) {
+    if (!this._expanded && this._alerts.length > 1)
+      return { top: this._alerts[0]?.id === alert.id, open: () => this._setExpanded(true, true) };
+    const c = this._expanded && this._closedOf?.get(alert.id);
+    return c ? { top: c.top, open: () => this._setGroupOpen(c.owner, true) } : null;
   }
 
   _onClick(ev) {
     if (this._suppressClick) return;
-    const item = ev.target.closest('.item');
+    const t = ev.target;
+    const head = t.closest('.gh');
+    if (head) {
+      if (t.closest('[data-gless]')) this._setGroupOpen(head.dataset.gid, false);
+      return;
+    }
+    const item = t.closest('.item');
     if (!item || item.classList.contains('leaving')) return;
     const alert = this._alertFor(item);
     if (!alert) return;
-    const collapsed = this._isCollapsed();
     if (this._expanded) this._armAutoCollapse();
+    const fold = this._foldOf(alert);
+    if (fold && !fold.top) return fold.open();
 
-    if (collapsed && this._alerts[0]?.id !== alert.id) return this._setExpanded(true, true);
-
-    const t = ev.target;
     if (t.closest('[data-close]')) return this._animateOut(item, 1, () => this._dismiss(alert));
     if (t.closest('[data-snz-open]')) return this._setSnoozeOpen(this._snoozeOpen === alert.id ? null : alert.id);
     if (t.closest('[data-snz-cancel]')) return this._setSnoozeOpen(null);
@@ -929,7 +1315,7 @@ class NotificationStackCard extends HTMLElement {
     const actBtn = t.closest('[data-act]');
     if (actBtn) return this._onActionButton(alert, Number(actBtn.dataset.act));
 
-    if (collapsed) return this._setExpanded(true, true);
+    if (fold) return fold.open();
     if (alert.tap_action) {
       this._haptic();
       this._runAction(alert.tap_action, alert);
@@ -945,10 +1331,19 @@ class NotificationStackCard extends HTMLElement {
     this._expanded = v;
     this._confirming = null;
     this._snoozeOpen = null;
+    this._openGroups.clear();
     if (user) this._haptic();
     if (v) this._armAutoCollapse();
     else clearTimeout(this._acTimer);
     if (!v) this._items.forEach((el) => el.classList.remove('full'));
+    this._refresh();
+  }
+
+  _setGroupOpen(gid, open) {
+    if (open) this._openGroups.add(gid);
+    else this._openGroups.delete(gid);
+    this._haptic();
+    this._armAutoCollapse();
     this._refresh();
   }
 
@@ -976,9 +1371,10 @@ class NotificationStackCard extends HTMLElement {
     if (this._confirming !== 'clear') return this._setConfirming('clear');
     this._haptic();
     this._alerts.filter((a) => a.dismissible).forEach((a) => this._dismiss(a, true));
-    writeStore(this._dismissKey, this._dismissed);
+    writeStore(this._keys.dismissed, this._dismissed);
     this._confirming = null;
     this._expanded = false;
+    this._openGroups.clear();
     this._refresh();
   }
 
@@ -986,7 +1382,7 @@ class NotificationStackCard extends HTMLElement {
     if (this._confirming !== 'unsnooze') return this._setConfirming('unsnooze');
     this._haptic();
     this._snoozed = {};
-    writeStore(this._snoozeKey, this._snoozed);
+    writeStore(this._keys.snoozed, this._snoozed);
     this._confirming = null;
     this._refresh();
   }
@@ -1050,17 +1446,16 @@ class NotificationStackCard extends HTMLElement {
       delete this._pn[alert.notification_id];
     } else {
       this._dismissed[alert.id] = alert.tokens;
-      if (!batch) writeStore(this._dismissKey, this._dismissed);
+      if (!batch) writeStore(this._keys.dismissed, this._dismissed);
     }
     if (!batch) this._refresh();
   }
 
   _snooze(item, alert, k) {
-    const opt = this._optionsFor(alert)[k];
-    const until = snoozeEnd(opt);
+    const until = snoozeEnd(this._optionsFor(alert)[k]);
     if (!until) return;
     this._snoozed[alert.id] = { until, tokens: alert.tokens };
-    writeStore(this._snoozeKey, this._snoozed);
+    writeStore(this._keys.snoozed, this._snoozed);
     this._snoozeOpen = null;
     this._animateOut(item, 1, () => this._refresh());
   }
@@ -1079,7 +1474,8 @@ class NotificationStackCard extends HTMLElement {
     const item = ev.target.closest('.item');
     const alert = this._alertFor(item);
     if (!alert || !alert.dismissible) return;
-    if (this._isCollapsed() && this._alerts[0]?.id !== alert.id) return;
+    const fold = this._foldOf(alert);
+    if (fold && !fold.top) return;
     this._drag = { item, alert, x0: ev.clientX, y0: ev.clientY, dx: 0, active: false, id: ev.pointerId };
   }
 
@@ -1139,13 +1535,13 @@ let haComponentsReady;
 function loadHaComponents() {
   if (!haComponentsReady) {
     haComponentsReady = (async () => {
-      if (!customElements.get('ha-form') || !customElements.get('hui-card-features-editor')) {
+      if (!customElements.get('ha-form')) {
         try {
           const helpers = await window.loadCardHelpers?.();
           const card = await helpers?.createCardElement({ type: 'entities', entities: [] });
           await card?.constructor?.getConfigElement?.();
         } catch (_) {
-          /* fall through: ha-form is normally already loaded inside the card editor */
+          /* ha-form is normally already loaded inside the card editor */
         }
       }
       await Promise.race([customElements.whenDefined('ha-form'), new Promise((r) => setTimeout(r, 3000))]);
@@ -1172,9 +1568,12 @@ const sel = {
   action: { ui_action: {} },
   yaml: { object: {} },
   entity: { entity: {} },
+  person: { entity: { filter: [{ domain: 'person' }] } },
+  zones: { entity: { filter: [{ domain: 'zone' }], multiple: true } },
+  time: { time: {} },
   color: { color_rgb: {} },
   num: (min, max, unit, step = 1) => ({ number: { min, max, step, mode: 'box', unit_of_measurement: unit } }),
-  select: (options, mode = 'dropdown') => ({ select: { mode, options } }),
+  select: (options, extra = {}) => ({ select: { mode: 'dropdown', options, ...extra } }),
 };
 const grid = (...schema) => ({ type: 'grid', name: '', schema });
 const expandable = (name, title, icon, schema) => ({ type: 'expandable', name, title, icon, flatten: true, schema });
@@ -1182,13 +1581,16 @@ const expandable = (name, title, icon, schema) => ({ type: 'expandable', name, t
 const LABELS = {
   title: 'Title',
   persistent_notifications: 'Show Home Assistant notifications',
-  hide_when_empty: 'Hide when there is nothing to show',
-  show_header: 'Show header (title and count)',
+  when_empty: 'When there is nothing to show',
+  show_header: 'Show header',
   header_align: 'Header alignment',
   header_padding_left: 'Padding left',
   header_padding_right: 'Padding right',
+  count_position: 'Count',
+  snoozed_position: 'Snoozed chip',
   width: 'Width',
   height: 'Max height when expanded',
+  collapsed_height: 'Max height when collapsed',
   card_align: 'Card alignment',
   max_peek: 'Cards peeking behind',
   peek_offset: 'Peek offset',
@@ -1196,6 +1598,10 @@ const LABELS = {
   auto_collapse: 'Auto-collapse after',
   sort: 'Sort by',
   show_time: 'Show time',
+  group_stacks: 'Fold groups into sub-stacks when expanded',
+  show_groups: 'Only show these groups',
+  show_ungrouped: 'Also show alerts without a group',
+  zone_person: 'Person for zones',
   persistent_severity: 'Severity',
   persistent_icon: 'Icon',
   persistent_group: 'Group',
@@ -1205,7 +1611,8 @@ const LABELS = {
   snooze: 'Allow snoozing',
   snooze_display: 'Snooze control',
   snooze_label: 'Snooze button text',
-  show_snoozed: 'Show snoozed count',
+  template_name: 'Share this card as template',
+  templates: 'Use templates',
   label: 'Text shown',
   type: 'Snooze',
   minutes: 'Duration',
@@ -1216,10 +1623,16 @@ const LABELS = {
   icon: 'Icon',
   severity: 'Severity',
   show_name: 'Show group name on cards',
+  stack: 'Fold into a sub-stack',
   dismissible: 'Dismissible',
   snoozable: 'Snoozable',
   tap_action: 'Tap action',
   conditions: 'Only when (conditions, YAML)',
+  quiet_start: 'Quiet from',
+  quiet_end: 'Quiet until',
+  quiet_critical: 'Critical alerts still show',
+  zones: 'Zones',
+  zone_mode: 'Show when the person is',
   group: 'Group',
   message: 'Message',
   state: 'State is',
@@ -1237,41 +1650,49 @@ const LABELS = {
 };
 
 const HELPERS = {
+  when_empty:
+    'Hide: takes no space. Keep its space: invisible, but holds the height of the collapsed card so nothing below moves. Show: displays the empty text.',
   width: 'e.g. 360px or 90%. Blank fills the space.',
   height: 'e.g. 420px. The list scrolls past it.',
+  collapsed_height:
+    'In px, includes the peeking cards. Tighter peeks first, then fewer peeking cards, then the top card fades out at the bottom.',
+  show_groups: 'Leave empty to show every group.',
+  zone_person: 'Used when the viewer has no person, e.g. a wall tablet. Groups can override it.',
   storage_key: 'Give a second copy of this card its own dismiss/snooze memory.',
+  template_name: 'Other cards can then reuse this card\'s groups, alerts and snooze options by this name.',
+  templates: 'Pick shared templates, or type dashboard/name. This card\'s own groups and alerts are added on top.',
+};
+const ALERT_HELPERS = {
   state: 'Comma separated. Leave all match fields blank to match "on".',
   message: 'Placeholders: {name} {state} {value} {since} {attr:key}',
   combined_title: 'Used when 2+ entities match. Adds {count} and {names}.',
   conditions: '- entity: input_boolean.away_mode\n  state: "on"',
   id: 'Keeps dismiss/snooze memory if you reorder alerts.',
 };
+const GROUP_HELPERS = {
+  zone_person: 'Blank: whoever is viewing (or the card\'s person for zones).',
+  quiet_critical: 'Turn off to hide critical alerts in this group during quiet hours too.',
+  conditions: '- entity: input_boolean.guest_mode\n  state: "off"',
+};
 
-const GENERAL_SCHEMA = [
-  { name: 'title', selector: sel.text },
-  grid({ name: 'persistent_notifications', selector: sel.bool }, { name: 'hide_when_empty', selector: sel.bool }),
-  expandable('g_header', 'Header', 'mdi:format-title', [
-    { name: 'show_header', selector: sel.bool },
-    { name: 'header_align', selector: sel.select(ALIGN_OPTIONS, 'list') },
-    grid(
-      { name: 'header_padding_left', selector: sel.num(0, 200, 'px') },
-      { name: 'header_padding_right', selector: sel.num(0, 200, 'px') }
-    ),
-  ]),
-  expandable('g_layout', 'Size and layout', 'mdi:arrow-expand-all', [
-    grid({ name: 'width', selector: sel.text }, { name: 'height', selector: sel.text }),
-    { name: 'card_align', selector: sel.select(ALIGN_OPTIONS, 'list') },
-    grid({ name: 'max_peek', selector: sel.num(0, 5) }, { name: 'peek_offset', selector: sel.num(0, 40, 'px') }),
-    grid({ name: 'message_lines', selector: sel.num(1, 10) }, { name: 'auto_collapse', selector: sel.num(0, 600, 's') }),
-    grid(
-      { name: 'sort', selector: sel.select([{ value: 'severity', label: 'Severity, then newest' }, { value: 'time', label: 'Newest first' }]) },
-      { name: 'show_time', selector: sel.bool }
-    ),
-  ]),
+const ALERT_FORM_KEYS = [
+  'id', 'group', 'title', 'message', 'severity', 'icon', 'combine', 'combined_title', 'combined_message',
+  'state', 'state_not', 'above', 'below', 'attribute', 'conditions', 'dismissible', 'snoozable', 'tap_action',
+];
+const GROUP_KEYS = [
+  'id', 'name', 'color', 'icon', 'severity', 'show_name', 'stack', 'dismissible', 'snoozable', 'tap_action',
+  'conditions', 'quiet_hours', 'zones', 'zone_mode', 'zone_person',
 ];
 
+const schemaKeys = (schema) => schema.flatMap((s) => (s.schema ? schemaKeys(s.schema) : s.name ? [s.name] : []));
+const listToText = (v) => toList(v).join(', ');
+const textToList = (t) => {
+  const parts = String(t ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  return parts.length === 0 ? undefined : parts.length === 1 ? parts[0] : parts;
+};
+
 const SNOOZE_SCHEMA = [
-  grid({ name: 'snooze', selector: sel.bool }, { name: 'show_snoozed', selector: sel.bool }),
+  { name: 'snooze', selector: sel.bool },
   grid(
     {
       name: 'snooze_display',
@@ -1290,26 +1711,14 @@ const ADVANCED_SCHEMA = [
   { name: 'styles', selector: sel.multiline },
 ];
 
-const ALERT_FORM_KEYS = [
-  'id', 'group', 'title', 'message', 'severity', 'icon', 'combine', 'combined_title', 'combined_message',
-  'state', 'state_not', 'above', 'below', 'attribute', 'conditions', 'dismissible', 'snoozable', 'tap_action',
-];
-
-const schemaKeys = (schema) =>
-  schema.flatMap((s) => (s.schema ? schemaKeys(s.schema) : s.name ? [s.name] : []));
-
-const listToText = (v) => toList(v).join(', ');
-const textToList = (t) => {
-  const parts = String(t ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  return parts.length === 0 ? undefined : parts.length === 1 ? parts[0] : parts;
-};
-
 const EDITOR_STYLE = `
 :host { display: block; }
 .ed { display: flex; flex-direction: column; gap: 12px; }
 h3 { margin: 12px 0 0; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 h3 ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
-.hint { margin: -6px 0 0; font-size: 12px; color: var(--secondary-text-color); }
+.hint, .note { margin: -6px 0 0; font-size: 12px; color: var(--secondary-text-color); }
+.note:empty { display: none; }
+.note.err { color: var(--error-color, #db4437); }
 .list { display: flex; flex-direction: column; gap: 8px; }
 .rowbox {
   display: flex; gap: 8px; align-items: flex-start;
@@ -1351,20 +1760,64 @@ class NotificationStackCardEditor extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._open = new Set();
     this._bindings = [];
+    this._tplOptions = [];
+    this._tpl = { key: '', groups: [], alerts: 0, errors: [], loading: false };
   }
 
   set hass(hass) {
+    const first = !this._hass;
     this._hass = hass;
     this._bindings.forEach((b) => (b.el.hass = hass));
+    if (first) {
+      this._discover();
+      this._loadTemplates();
+    }
   }
 
   setConfig(config) {
     this._config = clone(config) || {};
+    this._loadTemplates();
     this._render();
   }
 
   connectedCallback() {
     loadHaComponents().then(() => this._render(true));
+  }
+
+  // ----- templates -----
+
+  _discover() {
+    if (!this._hass?.callWS) return;
+    TemplateStore.discover(this._hass).then((opts) => {
+      this._tplOptions = opts;
+      this._refreshAll();
+    });
+  }
+
+  _loadTemplates() {
+    const refs = toList(this._config?.templates);
+    const key = JSON.stringify(refs);
+    if (!this._hass?.callWS || key === this._tpl.key) return;
+    this._tpl = { key, groups: [], alerts: 0, errors: [], loading: refs.length > 0 };
+    if (!refs.length) return this._refreshAll();
+    Promise.all(refs.map((r) => TemplateStore.resolve(this._hass, r).catch((e) => ({ error: String(e?.message || e) })))).then(
+      (res) => {
+        if (key !== this._tpl.key) return;
+        const ok = res.filter((x) => !x.error);
+        this._tpl = {
+          key,
+          groups: ok.flatMap((t) => t.groups),
+          alerts: ok.reduce((n, t) => n + t.alerts.length, 0),
+          errors: res.filter((x) => x.error).map((x) => x.error),
+          loading: false,
+        };
+        this._refreshAll();
+      }
+    );
+  }
+
+  _refreshAll() {
+    this._bindings.forEach((b) => b.refresh());
   }
 
   // ----- config access -----
@@ -1376,12 +1829,24 @@ class NotificationStackCardEditor extends HTMLElement {
   _groups() {
     const g = this._config.groups;
     if (Array.isArray(g)) return g;
-    if (g && typeof g === 'object') return Object.entries(g).map(([id, v]) => ({ id, ...v }));
+    if (isObj(g)) return Object.entries(g).map(([id, v]) => ({ id, ...v }));
     return [];
   }
 
-  _groupMap() {
-    return normalizeGroups(this._groups());
+  /** Local groups plus template groups (local wins), for pickers and inheritance. */
+  _allGroups() {
+    const map = new Map();
+    this._tpl.groups.forEach((g) => map.set(g.id, { ...g, fromTemplate: true }));
+    normalizeGroups(this._groups()).forEach((g, id) => map.set(id, g));
+    return map;
+  }
+
+  _groupOptions(noneLabel) {
+    const opts = [...this._allGroups().values()].map((g) => ({
+      value: String(g.id),
+      label: `${g.name || g.id}${g.fromTemplate ? ' (template)' : ''}`,
+    }));
+    return noneLabel ? [{ value: '__none', label: noneLabel }, ...opts] : opts;
   }
 
   _snoozeList() {
@@ -1395,6 +1860,7 @@ class NotificationStackCardEditor extends HTMLElement {
 
   _commit(cfg) {
     this._config = cfg;
+    this._loadTemplates();
     this._render();
     this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: cfg }, bubbles: true, composed: true }));
   }
@@ -1405,7 +1871,7 @@ class NotificationStackCardEditor extends HTMLElement {
     this._commit(cfg);
   }
 
-  /** Write top-level keys from a form, dropping blanks and defaults. */
+  /** Write top-level keys from a form, dropping blanks, defaults and replaced legacy keys. */
   _setTop(value, keys) {
     this._patch((cfg) => {
       for (const k of keys) {
@@ -1413,6 +1879,8 @@ class NotificationStackCardEditor extends HTMLElement {
         if (isBlank(v) || (k in DEFAULTS && deepEq(v, DEFAULTS[k]))) delete cfg[k];
         else cfg[k] = v;
       }
+      if (keys.includes('when_empty')) delete cfg.hide_when_empty;
+      if (keys.includes('snoozed_position')) delete cfg.show_snoozed;
     });
   }
 
@@ -1429,6 +1897,17 @@ class NotificationStackCardEditor extends HTMLElement {
     this._setList('alerts', alerts);
   }
 
+  _topData() {
+    const c = this._config;
+    return {
+      ...DEFAULTS,
+      ...c,
+      when_empty: oneOf(c.when_empty, EMPTY_MODES, c.hide_when_empty === false ? 'show' : 'hide'),
+      snoozed_position: oneOf(c.snoozed_position, SNOOZED_POSITIONS, c.show_snoozed === false ? 'hidden' : 'buttons'),
+      persistent_group: c.persistent_group || '__none',
+    };
+  }
+
   // ----- render -----
 
   _structure() {
@@ -1443,10 +1922,7 @@ class NotificationStackCardEditor extends HTMLElement {
   _render(force = false) {
     if (!this._config) return;
     const struct = this._structure();
-    if (!force && struct === this._struct && this._bindings.length) {
-      this._bindings.forEach((b) => b.refresh());
-      return;
-    }
+    if (!force && struct === this._struct && this._bindings.length) return this._refreshAll();
     this._struct = struct;
     this._build();
   }
@@ -1514,7 +1990,6 @@ class NotificationStackCardEditor extends HTMLElement {
     return frag;
   }
 
-  /** A row with a form plus move/delete tools. */
   _rowBox(form, idx, len, onMove, onDelete) {
     const box = document.createElement('div');
     box.className = 'rowbox';
@@ -1556,17 +2031,74 @@ class NotificationStackCardEditor extends HTMLElement {
       return;
     }
 
-    // General
-    const generalKeys = schemaKeys(GENERAL_SCHEMA);
-    ed.appendChild(
-      this._form(GENERAL_SCHEMA, () => ({ ...DEFAULTS, ...this._config }), (v) => this._setTop(v, generalKeys))
-    );
+    const generalSchema = () => [
+      { name: 'title', selector: sel.text },
+      {
+        name: 'when_empty',
+        selector: sel.select([
+          { value: 'hide', label: 'Hide (takes no space)' },
+          { value: 'reserve', label: 'Keep its space (invisible)' },
+          { value: 'show', label: 'Show the empty text' },
+        ]),
+      },
+      { name: 'persistent_notifications', selector: sel.bool },
+      expandable('g_header', 'Header', 'mdi:format-title', [
+        grid({ name: 'show_header', selector: sel.bool }, { name: 'header_align', selector: sel.select(ALIGN_OPTIONS) }),
+        grid(
+          {
+            name: 'count_position',
+            selector: sel.select([
+              { value: 'right', label: 'Right of the title' },
+              { value: 'left', label: 'Left of the title' },
+              { value: 'hidden', label: 'Hidden' },
+            ]),
+          },
+          {
+            name: 'snoozed_position',
+            selector: sel.select([
+              { value: 'buttons', label: 'With the buttons' },
+              { value: 'before_title', label: 'Before the title' },
+              { value: 'after_title', label: 'After the title' },
+              { value: 'hidden', label: 'Hidden' },
+            ]),
+          }
+        ),
+        grid(
+          { name: 'header_padding_left', selector: sel.num(0, 200, 'px') },
+          { name: 'header_padding_right', selector: sel.num(0, 200, 'px') }
+        ),
+      ]),
+      expandable('g_layout', 'Size and layout', 'mdi:arrow-expand-all', [
+        grid({ name: 'width', selector: sel.text }, { name: 'card_align', selector: sel.select(ALIGN_OPTIONS) }),
+        grid({ name: 'collapsed_height', selector: sel.num(40, 2000, 'px') }, { name: 'height', selector: sel.text }),
+        grid({ name: 'max_peek', selector: sel.num(0, 5) }, { name: 'peek_offset', selector: sel.num(0, 40, 'px') }),
+        grid({ name: 'message_lines', selector: sel.num(1, 10) }, { name: 'auto_collapse', selector: sel.num(0, 600, 's') }),
+        grid(
+          {
+            name: 'sort',
+            selector: sel.select([
+              { value: 'severity', label: 'Severity, then newest' },
+              { value: 'time', label: 'Newest first' },
+            ]),
+          },
+          { name: 'show_time', selector: sel.bool }
+        ),
+      ]),
+      expandable('g_filter', 'Groups and zones', 'mdi:filter-variant', [
+        { name: 'group_stacks', selector: sel.bool },
+        { name: 'show_groups', selector: sel.select(this._groupOptions(), { multiple: true }) },
+        { name: 'show_ungrouped', selector: sel.bool },
+        { name: 'zone_person', selector: sel.person },
+      ]),
+    ];
+    const generalKeys = schemaKeys(generalSchema());
+    ed.appendChild(this._form(generalSchema, () => this._topData(), (v) => this._setTop(v, generalKeys)));
 
+    this._buildTemplates(ed);
     this._buildSnooze(ed);
     this._buildGroups(ed);
     this._buildAlerts(ed);
 
-    // Persistent notifications + advanced
     const pnSchema = () => [
       expandable('g_pn', 'Home Assistant notifications', 'mdi:bell-outline', [
         grid(
@@ -1579,14 +2111,39 @@ class NotificationStackCardEditor extends HTMLElement {
     ];
     const pnKeys = ['persistent_severity', 'persistent_icon', 'persistent_group', ...schemaKeys(ADVANCED_SCHEMA)];
     ed.appendChild(
-      this._form(pnSchema, () => ({ ...DEFAULTS, ...this._config, persistent_group: this._config.persistent_group || '__none' }), (v) =>
+      this._form(pnSchema, () => this._topData(), (v) =>
         this._setTop({ ...v, persistent_group: v.persistent_group === '__none' ? '' : v.persistent_group }, pnKeys)
       )
     );
   }
 
-  _groupOptions(noneLabel) {
-    return [{ value: '__none', label: noneLabel }, ...this._groups().map((g) => ({ value: String(g.id), label: g.name || g.id }))];
+  // ----- templates -----
+
+  _buildTemplates(ed) {
+    ed.appendChild(
+      this._heading(
+        'mdi:content-copy',
+        'Templates',
+        "Share this card's groups, alerts and snooze options, or reuse a template from any dashboard. Layout stays per card."
+      )
+    );
+    const schema = () => [
+      { name: 'template_name', selector: sel.text },
+      { name: 'templates', selector: sel.select(this._tplOptions, { multiple: true, custom_value: true }) },
+    ];
+    ed.appendChild(this._form(schema, () => this._topData(), (v) => this._setTop(v, ['template_name', 'templates'])));
+    const note = document.createElement('p');
+    note.className = 'note';
+    ed.appendChild(note);
+    this._live(() => {
+      const t = this._tpl;
+      note.classList.toggle('err', t.errors.length > 0);
+      if (t.loading) note.textContent = 'Loading templates…';
+      else if (t.errors.length) note.textContent = t.errors.join(' · ');
+      else if (t.key && t.key !== '[]')
+        note.textContent = `From templates: ${t.groups.length} group(s), ${t.alerts} alert(s). Edit those on the card that shares them.`;
+      else note.textContent = '';
+    });
   }
 
   // ----- snooze -----
@@ -1594,7 +2151,7 @@ class NotificationStackCardEditor extends HTMLElement {
   _buildSnooze(ed) {
     ed.appendChild(this._heading('mdi:bell-sleep-outline', 'Snooze', 'Options people pick from when they snooze a notification.'));
     const keys = schemaKeys(SNOOZE_SCHEMA);
-    ed.appendChild(this._form(SNOOZE_SCHEMA, () => ({ ...DEFAULTS, ...this._config }), (v) => this._setTop(v, keys)));
+    ed.appendChild(this._form(SNOOZE_SCHEMA, () => this._topData(), (v) => this._setTop(v, keys)));
 
     const list = document.createElement('div');
     list.className = 'list';
@@ -1627,7 +2184,7 @@ class NotificationStackCardEditor extends HTMLElement {
           }
         ),
         ...(row.type === 'minutes' ? [{ name: 'minutes', selector: sel.num(1, 10080, 'min') }] : []),
-        ...(row.type === 'until' ? [{ name: 'time', selector: { time: {} } }] : []),
+        ...(row.type === 'until' ? [{ name: 'time', selector: sel.time }] : []),
       ];
     };
     const save = (next) => this._setList('snooze_options', next, (l) => deepEq(l, DEFAULT_SNOOZE));
@@ -1658,72 +2215,121 @@ class NotificationStackCardEditor extends HTMLElement {
 
   _buildGroups(ed) {
     ed.appendChild(
-      this._heading('mdi:shape-outline', 'Groups', 'Shared settings for alerts: color, icon, severity, buttons and more.')
+      this._heading(
+        'mdi:shape-outline',
+        'Groups',
+        'Shared settings for alerts: color, icon, severity, buttons, quiet hours and zones.'
+      )
     );
     const groups = this._groups();
     const save = (next) => this._setList('groups', next);
     const schema = [
       grid({ name: 'name', selector: sel.text }, { name: 'id', selector: sel.text }),
       grid({ name: 'color', selector: sel.color }, { name: 'icon', selector: sel.icon }),
-      grid(
-        { name: 'severity', selector: sel.select([{ value: '__default', label: 'Default (info)' }, ...SEVERITY_OPTIONS]) },
-        { name: 'show_name', selector: sel.bool }
-      ),
+      { name: 'severity', selector: sel.select([{ value: '__default', label: 'Default (info)' }, ...SEVERITY_OPTIONS]) },
+      grid({ name: 'show_name', selector: sel.bool }, { name: 'stack', selector: sel.bool }),
       grid({ name: 'dismissible', selector: sel.bool }, { name: 'snoozable', selector: sel.bool }),
       { name: 'tap_action', selector: sel.action },
+      expandable('q', 'Quiet hours', 'mdi:weather-night', [
+        grid({ name: 'quiet_start', selector: sel.time }, { name: 'quiet_end', selector: sel.time }),
+        { name: 'quiet_critical', selector: sel.bool },
+      ]),
+      expandable('z', 'Zones', 'mdi:map-marker-radius-outline', [
+        { name: 'zones', selector: sel.zones },
+        grid(
+          {
+            name: 'zone_mode',
+            selector: sel.select([
+              { value: 'inside', label: 'Inside one of these zones' },
+              { value: 'outside', label: 'Outside all of these zones' },
+            ]),
+          },
+          { name: 'zone_person', selector: sel.person }
+        ),
+      ]),
       { name: 'conditions', selector: sel.yaml },
     ];
     const toForm = (g) => ({
-      ...g,
+      id: g.id,
+      name: g.name,
+      color: g.color,
+      icon: g.icon,
       severity: validSeverity(g.severity) || '__default',
       show_name: g.show_name !== false,
+      stack: g.stack !== false,
       dismissible: g.dismissible !== false,
       snoozable: (g.snoozable ?? g.dismissible) !== false,
+      tap_action: g.tap_action,
+      quiet_start: g.quiet_hours?.start,
+      quiet_end: g.quiet_hours?.end,
+      quiet_critical: g.quiet_hours?.allow_critical !== false,
+      zones: toList(g.zones),
+      zone_mode: g.zone_mode === 'outside' ? 'outside' : 'inside',
+      zone_person: g.zone_person,
+      conditions: g.conditions,
     });
     const fromForm = (old, v) => {
       const g = { id: old.id };
-      if (v.id && v.id !== old.id) g.id = v.id.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_');
+      if (v.id && v.id !== old.id) g.id = v.id.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_') || old.id;
       if (v.name) g.name = v.name;
       if (!isBlank(v.color)) g.color = v.color;
       if (v.icon) g.icon = v.icon;
       if (validSeverity(v.severity)) g.severity = v.severity;
       if (v.show_name === false) g.show_name = false;
+      if (v.stack === false) g.stack = false;
       if (v.dismissible === false) g.dismissible = false;
       if (v.snoozable !== (v.dismissible !== false)) g.snoozable = v.snoozable;
       if (v.tap_action?.action) g.tap_action = v.tap_action;
+      if (v.quiet_start && v.quiet_end) {
+        g.quiet_hours = { start: v.quiet_start.slice(0, 5), end: v.quiet_end.slice(0, 5) };
+        if (v.quiet_critical === false) g.quiet_hours.allow_critical = false;
+      }
+      if (!isBlank(v.zones)) {
+        g.zones = toList(v.zones);
+        if (v.zone_mode === 'outside') g.zone_mode = 'outside';
+        if (v.zone_person) g.zone_person = v.zone_person;
+      }
       if (!isBlank(v.conditions)) g.conditions = v.conditions;
-      for (const [k, val] of Object.entries(old)) if (!(k in g) && !schemaKeys(schema).includes(k)) g[k] = val;
+      for (const [k, val] of Object.entries(old)) if (!(k in g) && !GROUP_KEYS.includes(k)) g[k] = val;
       return g;
     };
 
     const wrap = document.createElement('div');
     wrap.className = 'list';
     groups.forEach((g, i) => {
-      const key = `g:${i}`;
       const summary = (s) => {
-        s.innerHTML = `<span class="dot"></span><ha-icon icon="${esc(g.icon || 'mdi:shape-outline')}"></ha-icon><span class="sum"></span>`;
-        const dot = s.querySelector('.dot');
-        const sum = s.querySelector('.sum');
+        s.innerHTML = `<span class="dot"></span><ha-icon></ha-icon><span class="sum"></span>`;
+        const [dot, icon, sum] = [s.querySelector('.dot'), s.querySelector('ha-icon'), s.querySelector('.sum')];
         this._live(() => {
-            const cur = this._groups()[i] || {};
-            sum.innerHTML = `${esc(cur.name || cur.id)} <span class="sub">${esc(cur.id)}</span>`;
-            dot.style.background = cssColor(cur.color) || 'var(--primary-color)';
+          const cur = this._groups()[i] || {};
+          const bits = [cur.id];
+          if (cur.quiet_hours) bits.push(`quiet ${cur.quiet_hours.start}–${cur.quiet_hours.end}`);
+          if (toList(cur.zones).length) bits.push(`${toList(cur.zones).length} zone(s)`);
+          sum.innerHTML = `${esc(cur.name || cur.id)} <span class="sub">${esc(bits.join(' · '))}</span>`;
+          dot.style.background = cssColor(cur.color) || 'var(--primary-color)';
+          icon.setAttribute('icon', cur.icon || 'mdi:shape-outline');
         });
       };
       const body = (b) =>
         b.appendChild(
-          this._form(schema, () => toForm(this._groups()[i] || {}), (v) => {
-            const old = this._groups()[i];
-            const next = this._groups().map(clone);
-            next[i] = fromForm(old, v);
-            this._patch((cfg) => {
-              cfg.groups = next;
-              if (next[i].id !== old.id) {
-                cfg.alerts = toList(cfg.alerts).map((r) => (r.group === old.id ? { ...r, group: next[i].id } : r));
-                if (cfg.persistent_group === old.id) cfg.persistent_group = next[i].id;
-              }
-            });
-          })
+          this._form(
+            schema,
+            () => toForm(this._groups()[i] || {}),
+            (v) => {
+              const old = this._groups()[i];
+              const next = this._groups().map(clone);
+              next[i] = fromForm(old, v);
+              this._patch((cfg) => {
+                cfg.groups = next;
+                if (next[i].id !== old.id) {
+                  cfg.alerts = toList(cfg.alerts).map((r) => (r.group === old.id ? { ...r, group: next[i].id } : r));
+                  if (cfg.persistent_group === old.id) cfg.persistent_group = next[i].id;
+                  if (cfg.show_groups) cfg.show_groups = toList(cfg.show_groups).map((x) => (x === old.id ? next[i].id : x));
+                }
+              });
+            },
+            GROUP_HELPERS
+          )
         );
       const move = (d) => {
         const next = this._groups().map(clone);
@@ -1731,7 +2337,7 @@ class NotificationStackCardEditor extends HTMLElement {
         save(next);
       };
       wrap.appendChild(
-        this._panel(key, summary, body, [
+        this._panel(`g:${i}`, summary, body, [
           this._tool('mdi:arrow-up', 'Move up', () => move(-1), i === 0),
           this._tool('mdi:arrow-down', 'Move down', () => move(1), i === groups.length - 1),
           this._tool('mdi:delete-outline', 'Remove group', () => save(this._groups().filter((_, j) => j !== i))),
@@ -1741,7 +2347,7 @@ class NotificationStackCardEditor extends HTMLElement {
     ed.appendChild(wrap);
     ed.appendChild(
       this._addButton('Add group', () => {
-        const taken = new Set(this._groups().map((g) => g.id));
+        const taken = new Set([...this._allGroups().keys()]);
         let n = this._groups().length + 1;
         while (taken.has(`group_${n}`)) n += 1;
         this._open.add(`g:${this._groups().length}`);
@@ -1754,7 +2360,7 @@ class NotificationStackCardEditor extends HTMLElement {
 
   _alertSchema(i) {
     const rule = this._alerts()[i] || {};
-    const g = rule.group ? this._groupMap().get(String(rule.group)) : undefined;
+    const g = rule.group ? this._allGroups().get(String(rule.group)) : undefined;
     const multi = this._entityRows(rule).length > 1;
     return [
       { name: 'group', selector: sel.select(this._groupOptions('No group')) },
@@ -1791,14 +2397,14 @@ class NotificationStackCardEditor extends HTMLElement {
   }
 
   _inherited(rule) {
-    const g = rule.group ? this._groupMap().get(String(rule.group)) : undefined;
-    const dismissible = (rule.dismissible ?? g?.dismissible) !== false;
+    const g = rule.group ? this._allGroups().get(String(rule.group)) : undefined;
+    const dismissibleEff = (rule.dismissible ?? g?.dismissible) !== false;
     return {
       g,
       dismissible: g?.dismissible !== false,
-      dismissibleEff: dismissible,
-      snoozableDefault: (g?.snoozable ?? dismissible) !== false,
-      snoozableEff: (rule.snoozable ?? g?.snoozable ?? dismissible) !== false,
+      dismissibleEff,
+      snoozableDefault: (g?.snoozable ?? dismissibleEff) !== false,
+      snoozableEff: (rule.snoozable ?? g?.snoozable ?? dismissibleEff) !== false,
     };
   }
 
@@ -1827,7 +2433,6 @@ class NotificationStackCardEditor extends HTMLElement {
   }
 
   _alertFromForm(old, v) {
-    const fields = ALERT_FORM_KEYS;
     const r = {};
     const put = (k, val) => {
       if (!isBlank(val)) r[k] = val;
@@ -1847,16 +2452,14 @@ class NotificationStackCardEditor extends HTMLElement {
     }
     put('state', textToList(v.state));
     put('state_not', textToList(v.state_not));
-    if (Number.isFinite(Number(v.above)) && v.above !== '' && v.above !== undefined) r.above = Number(v.above);
-    if (Number.isFinite(Number(v.below)) && v.below !== '' && v.below !== undefined) r.below = Number(v.below);
+    if (v.above !== undefined && v.above !== '' && Number.isFinite(Number(v.above))) r.above = Number(v.above);
+    if (v.below !== undefined && v.below !== '' && Number.isFinite(Number(v.below))) r.below = Number(v.below);
     put('attribute', v.attribute);
     put('conditions', v.conditions);
-    const inh = this._inherited(r);
-    if (v.dismissible !== inh.dismissible) r.dismissible = v.dismissible;
-    const snzDefault = this._inherited(r).snoozableDefault;
-    if (v.snoozable !== snzDefault) r.snoozable = v.snoozable;
+    if (v.dismissible !== this._inherited(r).dismissible) r.dismissible = v.dismissible;
+    if (v.snoozable !== this._inherited(r).snoozableDefault) r.snoozable = v.snoozable;
     if (v.tap_action?.action) r.tap_action = v.tap_action;
-    for (const [k, val] of Object.entries(old)) if (!(k in r) && !fields.includes(k) && k !== 'actions') r[k] = val;
+    for (const [k, val] of Object.entries(old)) if (!(k in r) && !ALERT_FORM_KEYS.includes(k) && k !== 'actions') r[k] = val;
     if (old.actions) r.actions = old.actions;
     return r;
   }
@@ -1871,25 +2474,22 @@ class NotificationStackCardEditor extends HTMLElement {
     wrap.className = 'list';
 
     alerts.forEach((rule, i) => {
-      const key = `a:${rule.id || i}`;
       const summary = (s) => {
         s.innerHTML = `<span class="dot"></span><ha-icon></ha-icon><span class="sum"></span>`;
-        const dot = s.querySelector('.dot');
-        const icon = s.querySelector('ha-icon');
-        const sum = s.querySelector('.sum');
+        const [dot, icon, sum] = [s.querySelector('.dot'), s.querySelector('ha-icon'), s.querySelector('.sum')];
         this._live(() => {
-            const cur = this._alerts()[i] || {};
-            const inh = this._inherited(cur);
-            const sev = validSeverity(cur.severity) || validSeverity(inh.g?.severity) || 'info';
-            dot.style.background =
-              cssColor(cur.color ?? inh.g?.color) ||
-              { critical: 'rgb(220,60,60)', warning: 'rgb(255,152,0)', info: 'var(--primary-color)' }[sev];
-            icon.setAttribute('icon', cur.icon || inh.g?.icon || DEFAULT_ICONS[sev]);
-            const rows = this._entityRows(cur).filter((e) => e.entity);
-            const what = rows.length > 1 ? `${rows.length} entities` : rows[0]?.entity || 'No entity yet';
-            sum.innerHTML = `${esc(cur.title || rows[0]?.name || 'New alert')} <span class="sub">${esc(what)}${
-              inh.g ? ` · ${esc(inh.g.name || inh.g.id)}` : ''
-            }</span>`;
+          const cur = this._alerts()[i] || {};
+          const inh = this._inherited(cur);
+          const sev = validSeverity(cur.severity) || validSeverity(inh.g?.severity) || 'info';
+          dot.style.background =
+            cssColor(cur.color ?? inh.g?.color) ||
+            { critical: 'rgb(220,60,60)', warning: 'rgb(255,152,0)', info: 'var(--primary-color)' }[sev];
+          icon.setAttribute('icon', cur.icon || inh.g?.icon || DEFAULT_ICONS[sev]);
+          const rows = this._entityRows(cur).filter((e) => e.entity);
+          const what = rows.length > 1 ? `${rows.length} entities` : rows[0]?.entity || 'No entity yet';
+          sum.innerHTML = `${esc(cur.title || rows[0]?.name || 'New alert')} <span class="sub">${esc(what)}${
+            inh.g ? ` · ${esc(inh.g.name || inh.g.id)}` : ''
+          }</span>`;
         });
       };
       const body = (b) => {
@@ -1897,7 +2497,8 @@ class NotificationStackCardEditor extends HTMLElement {
           this._form(
             () => this._alertSchema(i),
             () => this._alertToForm(this._alerts()[i] || {}),
-            (v) => this._setAlert(i, this._alertFromForm(this._alerts()[i] || {}, v))
+            (v) => this._setAlert(i, this._alertFromForm(this._alerts()[i] || {}, v)),
+            ALERT_HELPERS
           )
         );
         this._buildEntityRows(b, i);
@@ -1909,7 +2510,7 @@ class NotificationStackCardEditor extends HTMLElement {
         saveAll(next);
       };
       wrap.appendChild(
-        this._panel(key, summary, body, [
+        this._panel(`a:${rule.id || i}`, summary, body, [
           this._tool('mdi:arrow-up', 'Move up', () => move(-1), i === 0),
           this._tool('mdi:arrow-down', 'Move down', () => move(1), i === alerts.length - 1),
           this._tool('mdi:delete-outline', 'Remove alert', () => saveAll(this._alerts().filter((_, j) => j !== i))),
@@ -1943,8 +2544,7 @@ class NotificationStackCardEditor extends HTMLElement {
       delete rule.combined_title;
       delete rule.combined_message;
     }
-    const ordered = rule.id ? { id: rule.id, ...rule } : rule;
-    this._setAlert(i, ordered);
+    this._setAlert(i, rule.id ? { id: rule.id, ...rule } : rule);
   }
 
   _buildEntityRows(b, i) {
@@ -1975,9 +2575,7 @@ class NotificationStackCardEditor extends HTMLElement {
     });
     b.appendChild(list);
     b.appendChild(
-      this._addButton('Add entity', () =>
-        this._writeEntities(i, [...this._entityRows(this._alerts()[i] || {}), { entity: '' }])
-      )
+      this._addButton('Add entity', () => this._writeEntities(i, [...this._entityRows(this._alerts()[i] || {}), { entity: '' }]))
     );
   }
 
@@ -2030,7 +2628,11 @@ class NotificationStackCardEditor extends HTMLElement {
       list.appendChild(this._rowBox(form, j, actions.length, move, (k) => save(getActions().filter((_, x) => x !== k))));
     });
     b.appendChild(list);
-    b.appendChild(this._addButton('Add button', () => save([...getActions(), { name: 'Open', icon: 'mdi:open-in-app', tap_action: { action: 'more-info' } }])));
+    b.appendChild(
+      this._addButton('Add button', () =>
+        save([...getActions(), { name: 'Open', icon: 'mdi:open-in-app', tap_action: { action: 'more-info' } }])
+      )
+    );
   }
 }
 
@@ -2045,7 +2647,7 @@ if (!customElements.get('notification-stack-card')) {
   window.customCards.push({
     type: 'notification-stack-card',
     name: 'Notification Stack Card',
-    description: 'Stacked, tap-to-expand alerts with groups, action buttons, dismiss and snooze.',
+    description: 'Stacked, tap-to-expand alerts with groups, templates, action buttons, dismiss and snooze.',
     preview: true,
   });
   console.info(`%c NOTIFICATION-STACK-CARD %c v${NSC_VERSION} `, 'background:#c33;color:#fff', 'background:#333;color:#fff');
