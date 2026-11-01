@@ -1,0 +1,14 @@
+# Wall-tablet card: reuses the "main" template from full.yaml and keeps its own layout.
+# The tablet's Home Assistant user has no person, so zones follow person.your_name.
+type: custom:notification-stack-card
+templates:
+  - dashboard-home/main   # dashboard URL / template name
+title: Home
+count_position: left
+snoozed_position: after_title
+show_groups: [security, water, vacuum]
+show_ungrouped: false
+zone_person: person.your_name
+collapsed_height: 120
+when_empty: reserve
+storage_key: tablet

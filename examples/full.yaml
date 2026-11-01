@@ -1,0 +1,153 @@
+# Notification Stack Card: a fuller example.
+# Replace the entity IDs with your own. Everything here can also be set up in the visual editor.
+# Pop-up hashes like "#vacuum" only work on views that contain those pop-ups.
+#
+# Groups give alerts shared defaults: color, icon, severity, dismissible, snoozable,
+#   tap_action, actions (buttons), conditions, snooze_options, show_name. Alert values win.
+# combine: true on a multi-entity alert shows one notification for all matches.
+#   Placeholders {count} and {names} are added; combined_title/combined_message are optional.
+# template_name lets other cards reuse these groups and alerts (see tablet.yaml).
+
+type: custom:notification-stack-card
+title: Notifications
+template_name: main
+persistent_notifications: true
+persistent_group: system
+auto_collapse: 30
+
+groups:
+  - id: security
+    name: Security
+    icon: mdi:shield-home-outline
+  - id: water
+    name: Leaks
+    color: [33, 150, 243]
+    icon: mdi:water-alert
+    severity: critical
+    dismissible: false
+    tap_action:
+      action: more-info
+  - id: vacuum
+    name: Vacuum
+    color: [0, 150, 136]
+    icon: mdi:robot-vacuum-alert
+    severity: warning
+    actions:
+      - name: Open
+        icon: mdi:robot-vacuum
+        tap_action:
+          action: navigate
+          navigation_path: "#vacuum"
+  - id: home
+    name: Home
+    color: [76, 175, 80]
+  - id: system
+    name: Home Assistant
+    color: [149, 117, 205]
+
+alerts:
+  - id: front_door_lock
+    group: security
+    entity: lock.front_door
+    state: [unlocked, unlocking, open, opening, jammed]
+    severity: critical
+    icon: mdi:lock-open-variant
+    title: Front door
+    message: "{state} · {since}"
+    tap_action:
+      action: more-info
+    actions:
+      - name: Lock
+        icon: mdi:lock
+        confirm: true
+        tap_action:
+          action: perform-action
+          perform_action: lock.lock
+          target:
+            entity_id: lock.front_door
+
+  - id: front_door_open
+    group: security
+    entity: binary_sensor.front_door_contact
+    severity: warning
+    icon: mdi:door-open
+    title: Front door open
+    message: "Opened {since}"
+
+  - id: windows_away
+    group: security
+    entities:
+      - entity: binary_sensor.living_room_window
+        name: Living room
+      - entity: binary_sensor.kitchen_window
+        name: Kitchen
+      - entity: binary_sensor.bedroom_window
+        name: Bedroom
+    combine: true
+    conditions:
+      - entity: input_boolean.away_mode
+        state: "on"
+    severity: warning
+    icon: mdi:window-open-variant
+    title: "{name} window open"
+    message: "Open {since}, away mode is on"
+    combined_title: "{count} windows open"
+    combined_message: "{names}"
+    actions:
+      - name: Turn off away mode
+        icon: mdi:home-account
+        confirm: true
+        tap_action:
+          action: perform-action
+          perform_action: input_boolean.turn_off
+          target:
+            entity_id: input_boolean.away_mode
+
+  - id: leaks
+    group: water
+    entities:
+      - entity: binary_sensor.kitchen_sink_leak
+        name: Kitchen sink
+      - entity: binary_sensor.bathroom_leak
+        name: Bathroom
+      - entity: binary_sensor.water_heater_leak
+        name: Water heater
+    title: "Leak: {name}"
+    message: "Water detected {since}"
+
+  - id: vacuum_error
+    group: vacuum
+    entity: sensor.robot_vacuum_error
+    state_not: none
+    title: Vacuum needs help
+    message: "{state}"
+    actions:
+      - name: Open
+        icon: mdi:robot-vacuum
+        tap_action:
+          action: navigate
+          navigation_path: "#vacuum"
+      - name: Dock
+        icon: mdi:home-import-outline
+        dismiss: true
+        tap_action:
+          action: perform-action
+          perform_action: vacuum.return_to_base
+          target:
+            entity_id: vacuum.robot_vacuum
+
+  - id: mail
+    group: home
+    entity: sensor.mail_today
+    above: 0
+    icon: mdi:email-outline
+    title: Mail today
+    message: "{value} piece(s) arriving"
+
+  - id: low_battery
+    group: home
+    entity: sensor.front_door_lock_battery
+    below: 20
+    icon: mdi:battery-alert
+    title: Lock battery low
+    message: "{value}% · {since}"
