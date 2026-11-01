@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0 — 2026-11-01
+
+- **`scroll_direction`**: with `message_overflow: scroll`, choose `vertical` (up through the lines, as before) or `horizontal`, which keeps each message on one line and scrolls it right to left like a ticker, looping seamlessly. Set it in the editor under Size and layout once Longer messages is set to Scroll. With reduced motion turned on, horizontal messages stay still.
+
 ## 0.6.3 — 2026-10-31
 
 - **Fix**: the stack could show on top of pop-ups and dialogs (Bubble Card pop-ups, for example). Its layering now stays inside the card.

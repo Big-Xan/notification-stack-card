@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.6.3
+ * notification-stack-card.js  v0.7.0
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -12,7 +12,7 @@
  * joins a combined alert. Persistent notifications are dismissed in Home Assistant.
  */
 
-const NSC_VERSION = '0.6.3';
+const NSC_VERSION = '0.7.0';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -25,6 +25,8 @@ const UNAVAILABLE = ['unavailable', 'unknown'];
 const EMPTY_MODES = ['hide', 'reserve', 'show'];
 const COUNT_POSITIONS = ['right', 'left', 'hidden'];
 const SNOOZED_POSITIONS = ['buttons', 'before_title', 'after_title', 'hidden'];
+const SCROLL_DIRECTIONS = ['vertical', 'horizontal'];
+const reducedMotion = () => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
 const DEFAULT_SNOOZE = [
   { label: '5 minutes', minutes: 5 },
@@ -50,6 +52,7 @@ const DEFAULTS = {
   peek_offset: 10,
   message_lines: 2,
   message_overflow: 'truncate',
+  scroll_direction: 'vertical',
   auto_collapse: 0,
   sort: 'severity',
   show_time: true,
@@ -438,6 +441,21 @@ const STYLE = `
   82%, 100% { transform: translateY(var(--nsc-scroll-dist, 0px)); }
 }
 @media (prefers-reduced-motion: reduce) { .msg.scrolling .mi { animation: none; } }
+/* Horizontal: one line that scrolls right to left like a ticker, with a copy following so it loops seamlessly. */
+.msg.hline { display: block; -webkit-line-clamp: unset; white-space: nowrap; overflow: hidden; max-height: none; }
+.msg.hline .mi, .msg.hline .mi2 { display: inline-block; white-space: nowrap; }
+.msg.hline .mi2 { margin-left: 32px; }
+.msg.marquee {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
+}
+.msg.marquee .mi, .msg.marquee .mi2 { animation: nsc-marquee var(--nsc-scroll-dur, 8s) linear infinite; }
+.item.full .msg .mi2, .item.behind .msg .mi2 { animation: none; }
+@keyframes nsc-marquee {
+  0%, 15% { transform: translateX(0); }
+  100% { transform: translateX(var(--nsc-scroll-dist, 0px)); }
+}
+@media (prefers-reduced-motion: reduce) { .msg.marquee .mi, .msg.marquee .mi2 { animation: none; } }
 
 .ibtns { display: flex; gap: 6px; flex: 0 0 auto; margin: -2px -2px 0 0; }
 .ib {
@@ -546,12 +564,14 @@ class NotificationStackCard extends HTMLElement {
       config.show_snoozed === false ? 'hidden' : 'buttons'
     );
     cfg.count_position = oneOf(config.count_position, COUNT_POSITIONS, 'right');
+    cfg.scroll_direction = oneOf(config.scroll_direction, SCROLL_DIRECTIONS, 'vertical');
     this._config = cfg;
 
     const key = cfg.storage_key || 'default';
     // Remembered height is per layout, so two copies of the card with different layouts don't overwrite each other.
     const layout = ['collapsed_height', 'max_peek', 'peek_offset', 'compact', 'message_lines', 'title_font_size',
-      'message_font_size', 'group_label', 'card_style', 'width', 'show_time'].map((k) => String(cfg[k] ?? '')).join('|');
+      'message_font_size', 'group_label', 'card_style', 'width', 'show_time'].map((k) => String(cfg[k] ?? '')).join('|') +
+      (cfg.message_overflow === 'scroll' && cfg.scroll_direction === 'horizontal' ? '|h' : '');
     let hash = 0;
     for (const ch of layout) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
     this._keys = {
@@ -1407,15 +1427,24 @@ class NotificationStackCard extends HTMLElement {
     this._refresh();
   }
 
-  /** In scroll mode, a message taller than its line limit scrolls up and back instead of truncating. */
+  /**
+   * In scroll mode, a message past its limit moves instead of truncating: vertically it scrolls up and back
+   * through the lines; horizontally it stays on one line and scrolls right to left.
+   */
   _fitMessage(el) {
     const msg = el.querySelector('.msg');
     if (!msg) return;
     const scroll = this._config.message_overflow === 'scroll' && !el.classList.contains('full');
+    const horizontal = scroll && this._config.scroll_direction === 'horizontal' && !reducedMotion();
+    if (!horizontal) {
+      msg.querySelector('.mi2')?.remove();
+      msg.classList.remove('hline', 'marquee');
+    }
     if (!scroll) {
       msg.classList.remove('scrolling');
       return;
     }
+    if (horizontal) return this._fitTicker(msg);
     const lineH = parseFloat(getComputedStyle(msg).lineHeight) || 17.5;
     const maxH = (Number(this._config.message_lines) || 2) * lineH;
     const full = msg.scrollHeight;
@@ -1428,10 +1457,31 @@ class NotificationStackCard extends HTMLElement {
     if (msg.classList.contains('scrolling') !== on) msg.classList.toggle('scrolling', on);
   }
 
+  _fitTicker(msg) {
+    msg.classList.remove('scrolling');
+    msg.classList.add('hline');
+    const mi = msg.querySelector('.mi');
+    let copy = msg.querySelector('.mi2');
+    const on = !!mi && mi.offsetWidth > msg.clientWidth + 1;
+    if (on) {
+      const dist = mi.offsetWidth + 32;
+      msg.style.setProperty('--nsc-scroll-dist', `${-dist}px`);
+      msg.style.setProperty('--nsc-scroll-dur', `${Math.max(5, dist / 40 / 0.85).toFixed(1)}s`);
+      if (!copy || copy.textContent !== mi.textContent) {
+        copy?.remove();
+        copy = mi.cloneNode(true);
+        copy.className = 'mi2';
+        copy.setAttribute('aria-hidden', 'true');
+        msg.appendChild(copy);
+      }
+    } else copy?.remove();
+    if (msg.classList.contains('marquee') !== on) msg.classList.toggle('marquee', on);
+  }
+
   _isCut(item) {
     const msg = item.querySelector('.msg');
     if (!msg || item.classList.contains('full')) return false;
-    return msg.classList.contains('scrolling') || msg.scrollHeight > msg.clientHeight + 1;
+    return msg.classList.contains('scrolling') || msg.classList.contains('marquee') || msg.scrollHeight > msg.clientHeight + 1;
   }
 
   /** While the card is opened up, a tap elsewhere or a navigation (e.g. a pop-up opening) folds it back. */
@@ -1717,6 +1767,7 @@ const LABELS = {
   peek_offset: 'Peek offset',
   message_lines: 'Message lines',
   message_overflow: 'Longer messages',
+  scroll_direction: 'Scroll direction',
   auto_collapse: 'Auto-collapse after',
   sort: 'Sort by',
   show_time: 'Show time',
@@ -1788,6 +1839,7 @@ const HELPERS = {
   group_label: 'Color dot keeps the group color next to the title without the name. The icon uses the group color either way.',
   card_style: 'Match my theme draws each notification as a normal Home Assistant card, so themes like Frosted Glass style it like your other cards.',
   message_overflow: 'Scrolling moves slowly through text past the line limit, then back. Tap a card to show it all.',
+  scroll_direction: 'Right to left keeps each message on one line and scrolls it like a ticker. Message lines then doesn\'t apply.',
   zone_person: 'Used when the viewer has no person, e.g. a wall tablet. Groups can override it.',
   storage_key: 'Give a second copy of this card its own dismiss/snooze memory.',
   template_name: 'Other cards can then reuse this card\'s groups, alerts and snooze options by this name.',
@@ -2035,6 +2087,7 @@ class NotificationStackCardEditor extends HTMLElement {
       ...c,
       when_empty: oneOf(c.when_empty, EMPTY_MODES, c.hide_when_empty === false ? 'show' : 'hide'),
       snoozed_position: oneOf(c.snoozed_position, SNOOZED_POSITIONS, c.show_snoozed === false ? 'hidden' : 'buttons'),
+      scroll_direction: oneOf(c.scroll_direction, SCROLL_DIRECTIONS, 'vertical'),
       persistent_group: c.persistent_group || '__none',
     };
   }
@@ -2221,6 +2274,17 @@ class NotificationStackCardEditor extends HTMLElement {
             ]),
           }
         ),
+        ...(this._topData().message_overflow === 'scroll'
+          ? [
+              {
+                name: 'scroll_direction',
+                selector: sel.select([
+                  { value: 'vertical', label: 'Top to bottom' },
+                  { value: 'horizontal', label: 'Right to left' },
+                ]),
+              },
+            ]
+          : []),
         grid(
           {
             name: 'sort',
@@ -2258,7 +2322,8 @@ class NotificationStackCardEditor extends HTMLElement {
         { name: 'zone_person', selector: sel.person },
       ]),
     ];
-    const generalKeys = schemaKeys(generalSchema());
+    // scroll_direction only shows with Scroll, so list it explicitly; the form passes it through either way.
+    const generalKeys = [...new Set([...schemaKeys(generalSchema()), 'scroll_direction'])];
     ed.appendChild(this._form(generalSchema, () => this._topData(), (v) => this._setTop(v, generalKeys)));
 
     this._buildTemplates(ed);

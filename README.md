@@ -24,21 +24,21 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
 ## Installation
 
-### Manual
-
-1. Copy `notification-stack-card.js` to `/config/www/`.
-2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.6.3`
-   - Type: JavaScript module
-3. Reload the browser. Bump the `?v=` number after every update.
-
-### HACS
+### HACS (recommended)
 
 1. In HACS, open the ⋮ menu → **Custom repositories**.
 2. Add `https://github.com/Big-Xan/notification-stack-card` with type **Dashboard**.
 3. Install **Notification Stack Card** and reload the browser.
 
 HACS adds the dashboard resource for you and updates its version on every update, so there's nothing to bump.
+
+### Manual
+
+1. Download `notification-stack-card.js` from the [latest release](https://github.com/Big-Xan/notification-stack-card/releases/latest) and copy it to `/config/www/`.
+2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
+   - URL: `/local/notification-stack-card.js?v=0.7.0`
+   - Type: JavaScript module
+3. Reload the browser. Bump the `?v=` number after every update.
 
 ## Quick start
 
@@ -86,7 +86,8 @@ Everything can also be set up in the visual editor.
 | `max_peek` | `2` | Cards peeking behind the top card |
 | `peek_offset` | `10` | Pixels each peeking card shows |
 | `message_lines` | `2` | Message lines shown before the rest is cut off (tap to show all) |
-| `message_overflow` | `truncate` | `truncate` (ends with …) or `scroll` (longer text scrolls slowly up and back) |
+| `message_overflow` | `truncate` | `truncate` (ends with …) or `scroll` (longer text moves instead of being cut off) |
+| `scroll_direction` | `vertical` | With `scroll`: `vertical` scrolls up through the lines and back; `horizontal` keeps each message on one line and scrolls it right to left like a ticker (`message_lines` then doesn't apply) |
 | `auto_collapse` | `0` | Seconds before the expanded list folds back (0 = never) |
 | `sort` | `severity` | `severity` (then newest) or `time` |
 | `show_time` | `true` | Relative time on each card |
@@ -440,7 +441,7 @@ Then point an alert at it, with a button to the view that holds your Adaptive Pl
 
 ### A short card for a busy dashboard
 
-A collapsed stack about 70px tall, with buttons tucked away until it opens and long messages scrolling instead of being cut off:
+A collapsed stack about 70px tall, with buttons tucked away until it opens and long messages scrolling instead of being cut off. Add `scroll_direction: horizontal` to scroll them sideways instead:
 
 ```yaml
 type: custom:notification-stack-card
