@@ -3,6 +3,7 @@
 A lightweight, stacked, tap-to-expand notification card for Home Assistant. Alerts come from your entities (and, optionally, Home Assistant's own notifications), stack like phone notifications, and expand into a full list with action buttons, dismiss and snooze.
 
 One self-contained JavaScript file. No dependencies. Includes a visual editor.
+<img width="1254" height="894" alt="Compact Frosted Notification Stack Cropped" src="https://github.com/user-attachments/assets/fe11d447-e95c-4919-be8f-160c557b9c71" />
 
 
 ## Features
