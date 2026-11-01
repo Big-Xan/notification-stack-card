@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.3.0
+ * notification-stack-card.js  v0.4.0
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -12,7 +12,7 @@
  * joins a combined alert. Persistent notifications are dismissed in Home Assistant.
  */
 
-const NSC_VERSION = '0.3.0';
+const NSC_VERSION = '0.4.0';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -44,9 +44,11 @@ const DEFAULTS = {
   height: '',
   collapsed_height: '',
   card_align: 'left',
+  card_style: 'theme',
   max_peek: 2,
   peek_offset: 10,
   message_lines: 2,
+  message_overflow: 'truncate',
   auto_collapse: 0,
   sort: 'severity',
   show_time: true,
@@ -364,9 +366,6 @@ const STYLE = `
   --nsc-tint: color-mix(in srgb, var(--nsc-accent) var(--nsc-tint-amount), transparent);
   position: absolute; top: 0; left: 0; right: 0;
   box-sizing: border-box; overflow: hidden;
-  border-radius: var(--nsc-radius); border: var(--nsc-border); box-shadow: var(--nsc-shadow);
-  background: linear-gradient(var(--nsc-tint), var(--nsc-tint)), var(--nsc-bg);
-  backdrop-filter: var(--nsc-blur); -webkit-backdrop-filter: var(--nsc-blur);
   transform: translate3d(var(--x, 0px), var(--y, 0px), 0) scale(var(--s, 1));
   transform-origin: 50% 100%;
   transition:
@@ -376,6 +375,13 @@ const STYLE = `
   touch-action: pan-y; cursor: pointer;
   user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
 }
+/* Built-in look. With card_style: theme, items are ha-cards styled by the active theme. */
+.item.own {
+  border-radius: var(--nsc-radius); border: var(--nsc-border); box-shadow: var(--nsc-shadow);
+  background: var(--nsc-bg);
+  backdrop-filter: var(--nsc-blur); -webkit-backdrop-filter: var(--nsc-blur);
+}
+.item .tint { position: absolute; inset: 0; background: var(--nsc-tint); border-radius: inherit; pointer-events: none; }
 .item.sev-critical { --nsc-accent: var(--nsc-critical); --nsc-tint-amount: 30%; }
 .item.sev-warning { --nsc-accent: var(--nsc-warning); --nsc-tint-amount: 12%; }
 .item.dragging { transition: height var(--nsc-duration) var(--nsc-ease); }
@@ -383,7 +389,7 @@ const STYLE = `
 .item.leaving, .item.hiddenstack { pointer-events: none; }
 .no-anim, .no-anim .item, .no-anim .gh { transition: none !important; }
 
-.content { padding: 12px; transition: opacity 200ms ease; }
+.content { position: relative; padding: 12px; transition: opacity 200ms ease; }
 .item.behind .content { opacity: 0; }
 .item.clipped .content {
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(var(--nsc-clip) - 30px), transparent calc(var(--nsc-clip) - 6px));
@@ -414,7 +420,15 @@ const STYLE = `
   white-space: pre-line; word-break: break-word;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--nsc-lines, 2); overflow: hidden;
 }
-.item.full .msg { display: block; -webkit-line-clamp: unset; }
+.msg.scrolling { display: block; -webkit-line-clamp: unset; max-height: calc(var(--nsc-lines, 2) * 1.35em); }
+.msg.scrolling .mi { display: block; animation: nsc-scroll var(--nsc-scroll-dur, 8s) ease-in-out infinite alternate; }
+.item.full .msg { display: block; -webkit-line-clamp: unset; max-height: none; }
+.item.full .msg .mi, .item.behind .msg .mi { animation: none; }
+@keyframes nsc-scroll {
+  0%, 18% { transform: translateY(0); }
+  82%, 100% { transform: translateY(var(--nsc-scroll-dist, 0px)); }
+}
+@media (prefers-reduced-motion: reduce) { .msg.scrolling .mi { animation: none; } }
 
 .ibtns { display: flex; gap: 6px; flex: 0 0 auto; margin: -2px -2px 0 0; }
 .ib {
@@ -1054,8 +1068,8 @@ class NotificationStackCard extends HTMLElement {
     for (const a of alerts) {
       let el = this._items.get(a.id);
       if (!el) {
-        el = document.createElement('div');
-        el.className = 'item entering';
+        el = document.createElement(cfg.card_style === 'glass' ? 'div' : 'ha-card');
+        el.className = cfg.card_style === 'glass' ? 'item own entering' : 'item entering';
         el.dataset.id = a.id;
         this._stack.appendChild(el);
         this._items.set(a.id, el);
@@ -1150,13 +1164,13 @@ class NotificationStackCard extends HTMLElement {
     ].join('');
     const time = cfg.show_time && a.ts ? `<span class="time">${esc(relTime(a.ts))}</span>` : '';
 
-    return `<div class="content">
+    return `<div class="tint"></div><div class="content">
       <div class="row">
         <div class="icon"><ha-icon icon="${esc(a.icon)}"></ha-icon></div>
         <div class="text">
           ${a.groupName ? `<div class="grp">${esc(a.groupName)}</div>` : ''}
           <div class="trow"><span class="ttl">${esc(a.title)}</span>${time}</div>
-          ${a.message ? `<div class="msg">${esc(a.message)}</div>` : ''}
+          ${a.message ? `<div class="msg"><span class="mi">${esc(a.message)}</span></div>` : ''}
         </div>
         ${ibtns ? `<div class="ibtns">${ibtns}</div>` : ''}
       </div>
@@ -1171,10 +1185,11 @@ class NotificationStackCard extends HTMLElement {
     const cfg = this._config;
     const alerts = this._alerts;
     const n = alerts.length;
+    this._items.forEach((el) => this._fitMessage(el));
     const H = new Map();
     alerts.forEach((a) => {
       const el = this._items.get(a.id);
-      H.set(a.id, el?.firstElementChild ? el.firstElementChild.offsetHeight : 0);
+      H.set(a.id, el?.querySelector('.content')?.offsetHeight || 0);
     });
     const gap = 8;
     const peek = Number(cfg.peek_offset) || 10;
@@ -1315,7 +1330,11 @@ class NotificationStackCard extends HTMLElement {
     const actBtn = t.closest('[data-act]');
     if (actBtn) return this._onActionButton(alert, Number(actBtn.dataset.act));
 
-    if (fold) return fold.open();
+    if (fold) {
+      // One tap opens the stack and, if this message is cut off, shows all of it.
+      if (this._isCut(item)) item.classList.add('full');
+      return fold.open();
+    }
     if (alert.tap_action) {
       this._haptic();
       this._runAction(alert.tap_action, alert);
@@ -1339,9 +1358,39 @@ class NotificationStackCard extends HTMLElement {
     this._refresh();
   }
 
+  /** In scroll mode, a message taller than its line limit scrolls up and back instead of truncating. */
+  _fitMessage(el) {
+    const msg = el.querySelector('.msg');
+    if (!msg) return;
+    const scroll = this._config.message_overflow === 'scroll' && !el.classList.contains('full');
+    if (!scroll) {
+      msg.classList.remove('scrolling');
+      return;
+    }
+    const lineH = parseFloat(getComputedStyle(msg).lineHeight) || 17.5;
+    const maxH = (Number(this._config.message_lines) || 2) * lineH;
+    const full = msg.scrollHeight;
+    const dist = Math.round(full - maxH);
+    const on = dist > 1;
+    if (on) {
+      msg.style.setProperty('--nsc-scroll-dist', `${-dist}px`);
+      msg.style.setProperty('--nsc-scroll-dur', `${Math.max(4, dist / 15 / 0.64).toFixed(1)}s`);
+    }
+    if (msg.classList.contains('scrolling') !== on) msg.classList.toggle('scrolling', on);
+  }
+
+  _isCut(item) {
+    const msg = item.querySelector('.msg');
+    if (!msg || item.classList.contains('full')) return false;
+    return msg.classList.contains('scrolling') || msg.scrollHeight > msg.clientHeight + 1;
+  }
+
   _setGroupOpen(gid, open) {
     if (open) this._openGroups.add(gid);
-    else this._openGroups.delete(gid);
+    else {
+      this._openGroups.delete(gid);
+      this._alerts.forEach((a) => a.group === gid && this._items.get(a.id)?.classList.remove('full'));
+    }
     this._haptic();
     this._armAutoCollapse();
     this._refresh();
@@ -1592,9 +1641,11 @@ const LABELS = {
   height: 'Max height when expanded',
   collapsed_height: 'Max height when collapsed',
   card_align: 'Card alignment',
+  card_style: 'Card look',
   max_peek: 'Cards peeking behind',
   peek_offset: 'Peek offset',
   message_lines: 'Message lines',
+  message_overflow: 'Longer messages',
   auto_collapse: 'Auto-collapse after',
   sort: 'Sort by',
   show_time: 'Show time',
@@ -1657,6 +1708,8 @@ const HELPERS = {
   collapsed_height:
     'In px, includes the peeking cards. Tighter peeks first, then fewer peeking cards, then the top card fades out at the bottom.',
   show_groups: 'Leave empty to show every group.',
+  card_style: 'Match my theme draws each notification as a normal Home Assistant card, so themes like Frosted Glass style it like your other cards.',
+  message_overflow: 'Scrolling moves slowly through text past the line limit, then back. Tap a card to show it all.',
   zone_person: 'Used when the viewer has no person, e.g. a wall tablet. Groups can override it.',
   storage_key: 'Give a second copy of this card its own dismiss/snooze memory.',
   template_name: 'Other cards can then reuse this card\'s groups, alerts and snooze options by this name.',
@@ -2069,10 +2122,26 @@ class NotificationStackCardEditor extends HTMLElement {
         ),
       ]),
       expandable('g_layout', 'Size and layout', 'mdi:arrow-expand-all', [
+        {
+          name: 'card_style',
+          selector: sel.select([
+            { value: 'theme', label: 'Match my theme (e.g. Frosted Glass)' },
+            { value: 'glass', label: 'Built-in glass' },
+          ]),
+        },
         grid({ name: 'width', selector: sel.text }, { name: 'card_align', selector: sel.select(ALIGN_OPTIONS) }),
         grid({ name: 'collapsed_height', selector: sel.num(40, 2000, 'px') }, { name: 'height', selector: sel.text }),
         grid({ name: 'max_peek', selector: sel.num(0, 5) }, { name: 'peek_offset', selector: sel.num(0, 40, 'px') }),
-        grid({ name: 'message_lines', selector: sel.num(1, 10) }, { name: 'auto_collapse', selector: sel.num(0, 600, 's') }),
+        grid(
+          { name: 'message_lines', selector: sel.num(1, 10) },
+          {
+            name: 'message_overflow',
+            selector: sel.select([
+              { value: 'truncate', label: 'Cut off with …' },
+              { value: 'scroll', label: 'Scroll through it' },
+            ]),
+          }
+        ),
         grid(
           {
             name: 'sort',
@@ -2081,8 +2150,9 @@ class NotificationStackCardEditor extends HTMLElement {
               { value: 'time', label: 'Newest first' },
             ]),
           },
-          { name: 'show_time', selector: sel.bool }
+          { name: 'auto_collapse', selector: sel.num(0, 600, 's') }
         ),
+        { name: 'show_time', selector: sel.bool },
       ]),
       expandable('g_filter', 'Groups and zones', 'mdi:filter-variant', [
         { name: 'group_stacks', selector: sel.bool },

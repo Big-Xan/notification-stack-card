@@ -16,6 +16,8 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 - **Dismiss** with the X or a swipe; **snooze** with your own options and labels
 - Dismissed and snoozed alerts **come back when something new happens**
 - **Home Assistant persistent notifications**, dismissed in HA itself
+- **Matches your theme**: notifications are drawn as regular Home Assistant cards, so card themes like Frosted Glass apply
+- Long messages can **scroll** instead of being cut off; one tap opens the stack and shows the full text
 - Header layout (alignment, padding, count and snoozed-chip positions), width, max heights, custom CSS
 
 ## Installation
@@ -24,7 +26,7 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
 1. Copy `notification-stack-card.js` to `/config/www/`.
 2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.3.0`
+   - URL: `/local/notification-stack-card.js?v=0.4.0`
    - Type: JavaScript module
 3. Reload the browser. Bump the `?v=` number after every update.
 
@@ -69,13 +71,15 @@ Everything can also be set up in the visual editor.
 | `header_padding_left` / `header_padding_right` | `4` | Header side padding (px) |
 | `count_position` | `right` | Count badge `right` or `left` of the title, or `hidden` |
 | `snoozed_position` | `buttons` | Snoozed chip `buttons`, `before_title`, `after_title` or `hidden` |
+| `card_style` | `theme` | `theme`: each notification is a normal Home Assistant card, styled by your theme (Frosted Glass and other card themes apply). `glass`: the card's own built-in look |
 | `width` | fill | e.g. `360px` or `90%` |
 | `card_align` | `left` | Card position when `width` is set |
 | `collapsed_height` | none | Max height of the collapsed stack in px, peeking cards included. Peeks tighten first, then fewer cards peek, then the top card fades out at the bottom |
 | `height` | none | Max height of the expanded list; it scrolls past this |
 | `max_peek` | `2` | Cards peeking behind the top card |
 | `peek_offset` | `10` | Pixels each peeking card shows |
-| `message_lines` | `2` | Message lines before truncating (tap to show all) |
+| `message_lines` | `2` | Message lines shown before the rest is cut off (tap to show all) |
+| `message_overflow` | `truncate` | `truncate` (ends with …) or `scroll` (longer text scrolls slowly up and back) |
 | `auto_collapse` | `0` | Seconds before the expanded list folds back (0 = never) |
 | `sort` | `severity` | `severity` (then newest) or `time` |
 | `show_time` | `true` | Relative time on each card |
@@ -191,7 +195,7 @@ Both are remembered per device in the browser. An alert stays hidden while nothi
 
 ## Theming
 
-The card uses your theme's card background, radius and text colors. These CSS variables can be overridden with `styles`:
+With `card_style: theme` (the default) each notification uses your theme's card styling. The colors for severities and chips, and the built-in look (`card_style: glass`), use these CSS variables, which `styles` can override:
 
 `--nsc-critical` `--nsc-warning` `--nsc-info` `--nsc-bg` `--nsc-radius` `--nsc-blur` `--nsc-border` `--nsc-shadow` `--nsc-duration`
 
