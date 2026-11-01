@@ -214,3 +214,248 @@ With `card_style: theme` (the default) each notification uses your theme's card 
 styles: |
   :host { --nsc-radius: 24px; --nsc-critical: #e53935; }
 ```
+
+## Example configurations
+
+Copy what you need into one card. Replace the entity IDs with your own; integrations name their entities after your devices, so yours will differ. Alert snippets all go in the card's `alerts:` list. A complete card is in [`examples/full.yaml`](examples/full.yaml), and a wall-tablet card that reuses it in [`examples/tablet.yaml`](examples/tablet.yaml).
+
+### Example groups
+
+```yaml
+groups:
+  - id: security
+    name: Security
+    icon: mdi:shield-home-outline
+  - id: water
+    name: Leaks
+    color: [33, 150, 243]
+    icon: mdi:water-alert
+    severity: critical       # sorted first, red
+    dismissible: false       # stays until the sensor is dry
+    tap_action:
+      action: more-info
+  - id: vacuum
+    name: Vacuum
+    color: [0, 150, 136]
+    icon: mdi:robot-vacuum-alert
+    severity: warning
+  - id: deliveries
+    name: Deliveries
+    color: [255, 167, 38]
+    icon: mdi:package-variant-closed
+    zones: [zone.home]       # only while you're home
+  - id: plants
+    name: Plants
+    color: [76, 175, 80]
+    icon: mdi:sprout
+    quiet_hours:
+      start: "21:00"
+      end: "08:00"
+  - id: system
+    name: Home Assistant
+    color: [149, 117, 205]
+
+persistent_notifications: true
+persistent_group: system     # Home Assistant's own notifications join this group
+```
+
+### Unlocked door
+
+```yaml
+alerts:
+  - id: front_door_lock
+    group: security
+    entity: lock.front_door
+    state: [unlocked, unlocking, open, opening, jammed]
+    severity: critical
+    icon: mdi:lock-open-variant
+    title: Front door
+    message: "{state} · {since}"
+    actions:
+      - name: Lock
+        icon: mdi:lock
+        confirm: true          # tap twice so it can't fire by accident
+        tap_action:
+          action: perform-action
+          perform_action: lock.lock
+          target:
+            entity_id: lock.front_door
+```
+
+### Leaks
+
+One alert covers every leak sensor. Each wet sensor gets its own notification, with the name you give it.
+
+```yaml
+  - id: leaks
+    group: water
+    entities:
+      - entity: binary_sensor.kitchen_sink_leak
+        name: Kitchen sink
+      - entity: binary_sensor.bathroom_leak
+        name: Bathroom
+      - entity: binary_sensor.water_heater_leak
+        name: Water heater
+    title: "Leak: {name}"
+    message: "Water detected {since}"
+```
+
+### Open windows and doors
+
+`combine` folds every open window into one notification ("3 windows open"). `conditions` limits it to when it matters, here while away mode is on.
+
+```yaml
+  - id: windows_away
+    group: security
+    entities:
+      - entity: binary_sensor.living_room_window
+        name: Living room
+      - entity: binary_sensor.kitchen_window
+        name: Kitchen
+      - entity: binary_sensor.bedroom_window
+        name: Bedroom
+    combine: true
+    conditions:
+      - entity: input_boolean.away_mode
+        state: "on"
+    severity: warning
+    icon: mdi:window-open-variant
+    title: "{name} window open"
+    message: "Open {since}"
+    combined_title: "{count} windows open"
+    combined_message: "{names}"
+
+  - id: back_door_open
+    group: security
+    entity: binary_sensor.back_door
+    icon: mdi:door-open
+    title: Back door open
+    message: "Opened {since}"
+```
+
+### Vacuum
+
+Vacuum integrations report problems differently. Roborock has error sensors that read `none` and `ok` when all is well; most others set the vacuum's own state to `error`.
+
+```yaml
+  - id: vacuum_error
+    group: vacuum
+    entity: sensor.robot_vacuum_vacuum_error     # Roborock
+    state_not: none
+    title: Vacuum needs help
+    message: "{state}"
+    actions:
+      - name: Dock
+        icon: mdi:home-import-outline
+        dismiss: true
+        tap_action:
+          action: perform-action
+          perform_action: vacuum.return_to_base
+          target:
+            entity_id: vacuum.robot_vacuum
+
+  - id: dock_error
+    group: vacuum
+    entity: sensor.robot_vacuum_dock_dock_error  # Roborock dock
+    state_not: ok
+    title: Dock needs attention
+    message: "{state}"
+
+  - id: vacuum_stuck
+    group: vacuum
+    entity: vacuum.robot_vacuum                  # any vacuum
+    state: error
+    title: Vacuum stopped
+    message: "Since {since}"
+```
+
+### Mail and packages
+
+These use [Mail and Packages](https://github.com/moralmunky/Home-Assistant-Mail-And-Packages) sensors, which count items. Check the entity IDs on your install; they depend on how the integration was set up.
+
+```yaml
+  - id: mail
+    group: deliveries
+    entity: sensor.mail_usps_mail
+    above: 0
+    icon: mdi:email-outline
+    title: Mail today
+    message: "{value} piece(s) from USPS"
+
+  - id: packages
+    group: deliveries
+    entities:
+      - entity: sensor.mail_usps_delivering
+        name: USPS
+      - entity: sensor.mail_ups_delivering
+        name: UPS
+      - entity: sensor.mail_fedex_delivering
+        name: FedEx
+    above: 0
+    combine: true
+    icon: mdi:truck-delivery-outline
+    title: "{name} package arriving"
+    message: "{value} out for delivery"
+    combined_title: Packages arriving
+    combined_message: "Out for delivery: {names}"
+```
+
+### Plant care with Adaptive Plant
+
+[Adaptive Plant](https://github.com/Big-Xan/adaptive_plant) schedules watering, fertilizing and health check-ins for each plant. To show one notification for everything due today, add a template sensor helper (**Settings → Devices & services → Helpers → Create helper → Template → Template sensor**) named `Plant tasks today` with this state template:
+
+```jinja
+{% set t = now().date() | string %}
+{% set ns = namespace(n=0) %}
+{% for e in integration_entities('adaptive_plant') | select('search', '_next_(watering|fertilization)$') %}
+  {% set s = states(e) %}
+  {% if s not in ['unknown', 'unavailable', ''] and s <= t %}
+    {% set ns.n = ns.n + 1 %}
+  {% endif %}
+{% endfor %}
+{% for e in integration_entities('adaptive_plant') | select('match', 'select\..*_health$') %}
+  {% if state_attr(e, 'health_check_in_overdue') %}
+    {% set ns.n = ns.n + 1 %}
+  {% endif %}
+{% endfor %}
+{{ ns.n }}
+```
+
+Then point an alert at it, with a button to the view that holds your Adaptive Plant card:
+
+```yaml
+  - id: plant_tasks
+    group: plants
+    entity: sensor.plant_tasks_today
+    above: 0
+    title: Plant care
+    message: "{value} task(s) due today"
+    actions:
+      - name: Plants
+        icon: mdi:flower
+        tap_action:
+          action: navigate
+          navigation_path: /dashboard-home/plants
+```
+
+### A short card for a busy dashboard
+
+A collapsed stack about 70px tall, with buttons tucked away until it opens and long messages scrolling instead of being cut off:
+
+```yaml
+type: custom:notification-stack-card
+# ...your groups and alerts, plus:
+show_header: false
+compact: true
+collapsed_height: 70
+peek_offset: 6
+message_lines: 1
+message_overflow: scroll
+title_font_size: 13
+message_font_size: 12
+group_label: none
+count_position: hidden
+snoozed_position: hidden
+when_empty: reserve
+auto_collapse: 30
+```
