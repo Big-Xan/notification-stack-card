@@ -26,7 +26,7 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
 1. Copy `notification-stack-card.js` to `/config/www/`.
 2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.4.0`
+   - URL: `/local/notification-stack-card.js?v=0.6.0`
    - Type: JavaScript module
 3. Reload the browser. Bump the `?v=` number after every update.
 
@@ -75,6 +75,7 @@ Everything can also be set up in the visual editor.
 | `width` | fill | e.g. `360px` or `90%` |
 | `card_align` | `left` | Card position when `width` is set |
 | `collapsed_height` | none | Max height of the collapsed stack in px, peeking cards included. Peeks tighten first, then fewer cards peek, then the top card fades out at the bottom |
+| `compact` | `false` | While collapsed, hide buttons so the stack stays short. They appear when the stack opens, or with a first tap on a single card |
 | `height` | none | Max height of the expanded list; it scrolls past this |
 | `max_peek` | `2` | Cards peeking behind the top card |
 | `peek_offset` | `10` | Pixels each peeking card shows |
@@ -83,6 +84,10 @@ Everything can also be set up in the visual editor.
 | `auto_collapse` | `0` | Seconds before the expanded list folds back (0 = never) |
 | `sort` | `severity` | `severity` (then newest) or `time` |
 | `show_time` | `true` | Relative time on each card |
+| `group_label` | `name` | How each card shows its group: `name`, `dot` (color dot only) or `none` |
+| `title_font_size` / `message_font_size` | `14` / `13` | Notification title and message text size (px) |
+| `group_font_size` | `10.5` | Group name size (px) |
+| `header_font_size` | `15` | Card header title size (px) |
 | `group_stacks` | `true` | Fold each group with 2+ alerts into a sub-stack in the expanded list |
 | `show_groups` | all | Only show these group IDs |
 | `show_ungrouped` | `true` | With `show_groups` set, also show alerts that have no group |

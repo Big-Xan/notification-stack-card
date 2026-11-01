@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0 — 2026-10-31
+
+- **`compact`**: while collapsed, buttons stay hidden so the stack can be very short (a 75px stack fits comfortably). They show when the stack opens; a single card shows them on the first tap, and its tap action runs on the next.
+
+## 0.5.0 — 2026-10-31
+
+- **Text sizes**: `title_font_size`, `message_font_size`, `group_font_size` and `header_font_size`, in a new Text section of the editor.
+- **`group_label`**: show the group `name` on each card, only a color `dot`, or `none`. The icon keeps the group color either way.
+
 ## 0.4.0 — 2026-10-31
 
 - **Matches your theme**: notifications are now drawn as regular Home Assistant cards, so card themes like Frosted Glass style them like your other cards. `card_style: glass` keeps the previous built-in look.

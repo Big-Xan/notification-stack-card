@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.4.0
+ * notification-stack-card.js  v0.5.0
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -12,7 +12,7 @@
  * joins a combined alert. Persistent notifications are dismissed in Home Assistant.
  */
 
-const NSC_VERSION = '0.4.0';
+const NSC_VERSION = '0.5.0';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -52,6 +52,11 @@ const DEFAULTS = {
   auto_collapse: 0,
   sort: 'severity',
   show_time: true,
+  group_label: 'name',
+  header_font_size: '',
+  group_font_size: '',
+  title_font_size: '',
+  message_font_size: '',
   when_empty: 'hide',
   empty_text: 'All clear',
   persistent_notifications: false,
@@ -335,7 +340,7 @@ const STYLE = `
 .al-right .hbtns { grid-column: 1; justify-self: start; }
 .htitle {
   display: flex; align-items: center; gap: 8px;
-  font-size: 15px; font-weight: 600; color: var(--primary-text-color); cursor: pointer;
+  font-size: var(--nsc-fs-header, 15px); font-weight: 600; color: var(--primary-text-color); cursor: pointer;
 }
 .htitle .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .htitle .title:empty { display: none; }
@@ -405,18 +410,19 @@ const STYLE = `
 .icon ha-icon { --mdc-icon-size: 22px; }
 .text { flex: 1 1 auto; min-width: 0; padding-top: 1px; }
 .grp {
-  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  font-size: var(--nsc-fs-group, 10.5px); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--nsc-accent); margin-bottom: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .trow { display: flex; align-items: baseline; gap: 8px; }
 .ttl {
-  flex: 1 1 auto; min-width: 0; font-size: 14px; font-weight: 600; color: var(--primary-text-color);
+  flex: 1 1 auto; min-width: 0; font-size: var(--nsc-fs-title, 14px); font-weight: 600; color: var(--primary-text-color);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .time { flex: 0 0 auto; font-size: 12px; color: var(--secondary-text-color); }
+.trow .gmark { flex: 0 0 auto; align-self: center; width: 8px; height: 8px; border-radius: 50%; background: var(--nsc-accent); }
 .msg {
-  margin-top: 2px; font-size: 13px; line-height: 1.35; color: var(--secondary-text-color);
+  margin-top: 2px; font-size: var(--nsc-fs-message, 13px); line-height: 1.35; color: var(--secondary-text-color);
   white-space: pre-line; word-break: break-word;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--nsc-lines, 2); overflow: hidden;
 }
@@ -468,7 +474,7 @@ const STYLE = `
 .gh .gdot { width: 8px; height: 8px; border-radius: 50%; background: var(--nsc-accent); flex: 0 0 auto; }
 .gh .gname {
   flex: 1 1 auto; min-width: 0; cursor: pointer;
-  font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--nsc-accent);
+  font-size: calc(var(--nsc-fs-group, 10.5px) + 1.5px); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--nsc-accent);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
@@ -975,6 +981,12 @@ class NotificationStackCard extends HTMLElement {
     this._wrap.style.marginLeft = width && cfg.card_align !== 'left' ? 'auto' : '0';
     this._wrap.style.marginRight = width && cfg.card_align !== 'right' ? 'auto' : '0';
     this.style.setProperty('--nsc-lines', String(Number(cfg.message_lines) || 2));
+    [
+      ['--nsc-fs-header', cfg.header_font_size],
+      ['--nsc-fs-group', cfg.group_font_size],
+      ['--nsc-fs-title', cfg.title_font_size],
+      ['--nsc-fs-message', cfg.message_font_size],
+    ].forEach(([prop, v]) => (cssSize(v) ? this.style.setProperty(prop, cssSize(v)) : this.style.removeProperty(prop)));
 
     titleRow.addEventListener('click', (ev) => {
       if (ev.target.closest('.snzc')) return;
@@ -1168,8 +1180,10 @@ class NotificationStackCard extends HTMLElement {
       <div class="row">
         <div class="icon"><ha-icon icon="${esc(a.icon)}"></ha-icon></div>
         <div class="text">
-          ${a.groupName ? `<div class="grp">${esc(a.groupName)}</div>` : ''}
-          <div class="trow"><span class="ttl">${esc(a.title)}</span>${time}</div>
+          ${a.groupName && cfg.group_label === 'name' ? `<div class="grp">${esc(a.groupName)}</div>` : ''}
+          <div class="trow">${
+            a.group && cfg.group_label === 'dot' ? `<span class="gmark" title="${esc(a.groupName)}"></span>` : ''
+          }<span class="ttl">${esc(a.title)}</span>${time}</div>
           ${a.message ? `<div class="msg"><span class="mi">${esc(a.message)}</span></div>` : ''}
         </div>
         ${ibtns ? `<div class="ibtns">${ibtns}</div>` : ''}
@@ -1649,6 +1663,11 @@ const LABELS = {
   auto_collapse: 'Auto-collapse after',
   sort: 'Sort by',
   show_time: 'Show time',
+  group_label: 'Group on each card',
+  header_font_size: 'Header',
+  group_font_size: 'Group name',
+  title_font_size: 'Notification title',
+  message_font_size: 'Message',
   group_stacks: 'Fold groups into sub-stacks when expanded',
   show_groups: 'Only show these groups',
   show_ungrouped: 'Also show alerts without a group',
@@ -1708,6 +1727,7 @@ const HELPERS = {
   collapsed_height:
     'In px, includes the peeking cards. Tighter peeks first, then fewer peeking cards, then the top card fades out at the bottom.',
   show_groups: 'Leave empty to show every group.',
+  group_label: 'Color dot keeps the group color next to the title without the name. The icon uses the group color either way.',
   card_style: 'Match my theme draws each notification as a normal Home Assistant card, so themes like Frosted Glass style it like your other cards.',
   message_overflow: 'Scrolling moves slowly through text past the line limit, then back. Tap a card to show it all.',
   zone_person: 'Used when the viewer has no person, e.g. a wall tablet. Groups can override it.',
@@ -2153,6 +2173,24 @@ class NotificationStackCardEditor extends HTMLElement {
           { name: 'auto_collapse', selector: sel.num(0, 600, 's') }
         ),
         { name: 'show_time', selector: sel.bool },
+      ]),
+      expandable('g_text', 'Text', 'mdi:format-size', [
+        grid(
+          { name: 'title_font_size', selector: sel.num(8, 40, 'px') },
+          { name: 'message_font_size', selector: sel.num(8, 40, 'px') }
+        ),
+        grid(
+          { name: 'group_font_size', selector: sel.num(6, 30, 'px') },
+          { name: 'header_font_size', selector: sel.num(8, 40, 'px') }
+        ),
+        {
+          name: 'group_label',
+          selector: sel.select([
+            { value: 'name', label: 'Group name' },
+            { value: 'dot', label: 'Color dot only' },
+            { value: 'none', label: 'Nothing' },
+          ]),
+        },
       ]),
       expandable('g_filter', 'Groups and zones', 'mdi:filter-variant', [
         { name: 'group_stacks', selector: sel.bool },
