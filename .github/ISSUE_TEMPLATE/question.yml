@@ -1,0 +1,62 @@
+name: Question / Support
+description: Need help with setup or configuration? Ask here.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Happy to help. Before asking, it's worth checking:
+        - The [README](https://github.com/Big-Xan/notification-stack-card/blob/main/README.md): every option and a set of example configurations
+        - Existing issues: someone may have asked the same thing
+
+  - type: input
+    id: card_version
+    attributes:
+      label: Card version
+      placeholder: e.g. 0.6.3
+    validations:
+      required: true
+
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: e.g. 2026.10.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: What is your question about?
+      options:
+        - Installation / HACS
+        - Writing alert rules
+        - Groups, quiet hours or zones
+        - Templates
+        - Layout and sizing
+        - Action buttons
+        - Visual editor
+        - Theme / styling
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What do you need help with?
+      description: Describe what you're trying to do and what isn't working as you expect.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Card configuration (if relevant)
+      render: yaml
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Any other context?

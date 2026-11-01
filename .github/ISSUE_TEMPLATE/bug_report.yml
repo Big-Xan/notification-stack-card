@@ -1,0 +1,113 @@
+name: Bug Report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. The more detail you give, the faster it can be fixed.
+
+        Before submitting, please check:
+        - You cleared the browser cache (or bumped the resource `?v=`) after updating
+        - It happens again after a page reload
+        - It hasn't already been reported in the existing issues
+
+  - type: input
+    id: card_version
+    attributes:
+      label: Card version
+      description: Shown in the browser console as NOTIFICATION-STACK-CARD vX.Y.Z, and on line 2 of the file
+      placeholder: e.g. 0.6.3
+    validations:
+      required: true
+
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: e.g. 2026.10.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      options:
+        - HACS (custom repository)
+        - Manual
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device and browser
+      description: Where you see the problem
+      placeholder: e.g. iPhone, Companion app; Chrome on Windows; wall tablet
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected_area
+    attributes:
+      label: What area is affected?
+      multiple: true
+      options:
+        - Alerts not showing / showing when they shouldn't
+        - Stack layout / expand / peek
+        - Dismiss or snooze
+        - Action buttons / tap actions
+        - Groups, quiet hours or zones
+        - Templates
+        - Home Assistant notifications
+        - Visual editor
+        - Theme / styling
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Card configuration
+      description: The card's YAML (three-dot menu → Edit in YAML). Replace anything private.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the dashboard with...
+        2. Tap...
+        3. See...
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Browser console errors
+      description: Any errors mentioning notification-stack-card.
+      render: text
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Anything else?
+      description: Screenshots, theme in use, other custom cards on the same view, etc.
