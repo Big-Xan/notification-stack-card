@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.3 — 2026-10-31
+
+- **Fix**: the stack could show on top of pop-ups and dialogs (Bubble Card pop-ups, for example). Its layering now stays inside the card.
+- **Folds back on its own**: an opened stack, snooze choices or a tapped-open card fold back when you tap anywhere outside the card or a pop-up opens.
+- **Snooze row**: the ✕ now sits at the right end of the snooze options, and the row uses the card's full width so the default three options fit on one line.
+
 ## 0.6.2 — 2026-10-31
 
 - **Fix**: tapping snooze on a collapsed stack only gave haptic feedback. It now opens the stack (or folded sub-stack) with the snooze options showing. With `compact`, a single card shows its snooze options in place.

@@ -26,13 +26,17 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
 1. Copy `notification-stack-card.js` to `/config/www/`.
 2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.6.2`
+   - URL: `/local/notification-stack-card.js?v=0.6.3`
    - Type: JavaScript module
 3. Reload the browser. Bump the `?v=` number after every update.
 
 ### HACS
 
-Not yet available while the repository is private.
+1. In HACS, open the ⋮ menu → **Custom repositories**.
+2. Add `https://github.com/Big-Xan/notification-stack-card` with type **Dashboard**.
+3. Install **Notification Stack Card** and reload the browser.
+
+HACS adds the dashboard resource for you and updates its version on every update, so there's nothing to bump.
 
 ## Quick start
 

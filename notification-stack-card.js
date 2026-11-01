@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.6.2
+ * notification-stack-card.js  v0.6.3
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -12,7 +12,7 @@
  * joins a combined alert. Persistent notifications are dismissed in Home Assistant.
  */
 
-const NSC_VERSION = '0.6.2';
+const NSC_VERSION = '0.6.3';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -325,7 +325,8 @@ const STYLE = `
 :host([hidden]) { display: none; }
 @media (prefers-reduced-motion: reduce) { :host { --nsc-duration: 0ms; } }
 
-.wrap { display: flex; flex-direction: column; gap: 8px; max-width: 100%; box-sizing: border-box; }
+/* isolation keeps the stack's z-index layering inside the card, so pop-ups and dialogs stay on top. */
+.wrap { display: flex; flex-direction: column; gap: 8px; max-width: 100%; box-sizing: border-box; isolation: isolate; }
 
 .header {
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
@@ -459,8 +460,10 @@ const STYLE = `
 .act span { overflow: hidden; text-overflow: ellipsis; }
 .act.confirm { background: var(--nsc-accent); color: #fff; }
 .act ha-icon { --mdc-icon-size: 18px; flex: 0 0 auto; }
+.actions.snz { padding-left: 0; flex-wrap: nowrap; align-items: flex-start; }
+.snz .opts { display: flex; flex-wrap: wrap; gap: 8px; flex: 1 1 auto; min-width: 0; }
 .snz .act { flex: 0 1 auto; padding: 7px 12px; }
-.snz .act.cancel { padding: 7px; }
+.snz .act.cancel { flex: 0 0 auto; padding: 7px; }
 .act:active, .ib:active, .hbtn:active { transform: scale(0.96); }
 
 .gh {
@@ -506,6 +509,10 @@ class NotificationStackCard extends HTMLElement {
     this._drag = null;
     this._suppressClick = false;
     this._lastW = 0;
+    this._onOutside = (ev) => {
+      if (!ev.composedPath().includes(this)) this._minimize();
+    };
+    this._onNav = () => this._minimize();
     this._tplListener = (dash) => {
       if (this._tplData?.some((t) => t.dashboard === dash) || this._tplErrors?.length) this._loadTemplates();
     };
@@ -591,6 +598,7 @@ class NotificationStackCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._watchOutside(false);
     clearInterval(this._timer);
     this._timer = null;
     [this._acTimer, this._confirmTimer, this._wakeTimer].forEach(clearTimeout);
@@ -1163,9 +1171,9 @@ class NotificationStackCard extends HTMLElement {
 
     let row;
     if (this._snoozeOpen === a.id) {
-      row = `<div class="actions snz">${this._optionsFor(a)
+      row = `<div class="actions snz"><div class="opts">${this._optionsFor(a)
         .map((o, k) => `<button class="act" data-snz="${k}">${esc(o.label)}</button>`)
-        .join('')}<button class="act cancel" data-snz-cancel aria-label="Cancel"><ha-icon icon="mdi:close"></ha-icon></button></div>`;
+        .join('')}</div><button class="act cancel" data-snz-cancel aria-label="Cancel"><ha-icon icon="mdi:close"></ha-icon></button></div>`;
     } else {
       const buttons = a.actions
         .map((b, j) => {
@@ -1294,6 +1302,9 @@ class NotificationStackCard extends HTMLElement {
     }
 
     this._stack.style.height = `${Math.max(0, total)}px`;
+    this._watchOutside(
+      this._expanded || !!this._snoozeOpen || !!this._confirming || [...this._items.values()].some((el) => el.classList.contains('full'))
+    );
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
         this._items.forEach((el) => el.classList.remove('entering'));
@@ -1421,6 +1432,27 @@ class NotificationStackCard extends HTMLElement {
     const msg = item.querySelector('.msg');
     if (!msg || item.classList.contains('full')) return false;
     return msg.classList.contains('scrolling') || msg.scrollHeight > msg.clientHeight + 1;
+  }
+
+  /** While the card is opened up, a tap elsewhere or a navigation (e.g. a pop-up opening) folds it back. */
+  _watchOutside(on) {
+    if (on === !!this._outsideOn) return;
+    this._outsideOn = on;
+    const fn = on ? 'addEventListener' : 'removeEventListener';
+    window[fn]('pointerdown', this._onOutside, true);
+    window[fn]('location-changed', this._onNav);
+    window[fn]('popstate', this._onNav);
+  }
+
+  _minimize() {
+    this._expanded = false;
+    this._openGroups.clear();
+    this._snoozeOpen = null;
+    this._confirming = null;
+    clearTimeout(this._acTimer);
+    this._items.forEach((el) => el.classList.remove('full'));
+    this._refresh();
+    this._layout();
   }
 
   _setGroupOpen(gid, open) {
