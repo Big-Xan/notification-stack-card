@@ -22,6 +22,8 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 - Long messages can **scroll** instead of being cut off; one tap opens the stack and shows the full text
 - Header layout (alignment, padding, count and snoozed-chip positions), width, max heights, custom CSS
 
+<img width="1800" height="1750" alt="gallery" src="https://github.com/user-attachments/assets/5c21c6f2-81cf-49f3-9316-bf838dade4fe" />
+
 ## Installation
 
 ### HACS (recommended)
@@ -65,6 +67,13 @@ alerts:
 ```
 
 Everything can also be set up in the visual editor.
+
+<img width="920" height="2898" alt="editor-card-options" src="https://github.com/user-attachments/assets/df6d6b7e-d115-4362-9e58-e30ac2843ade" />
+
+<img width="500" height="1330" alt="editor-group" src="https://github.com/user-attachments/assets/2cd4eded-7adf-4995-9cf8-743ccdde2247" />
+
+<img width="365" height="1552" alt="editor-alert" src="https://github.com/user-attachments/assets/f7486022-c6bb-4b55-996d-1dd89fbf20be" />
+
 
 ## Card options
 
