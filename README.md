@@ -78,6 +78,9 @@ Everything can also be set up in the visual editor.
 | `count_position` | `right` | Count badge `right` or `left` of the title, or `hidden` |
 | `snoozed_position` | `buttons` | Snoozed chip `buttons`, `before_title`, `after_title` or `hidden` |
 | `card_style` | `theme` | `theme`: each notification is a normal Home Assistant card, styled by your theme (Frosted Glass and other card themes apply). `glass`: the card's own built-in look |
+| `background_color` | theme | Notification background, as `[r, g, b]` or any CSS color. Groups and alerts can set their own |
+| `background_opacity` | `100` | Background opacity in %. Lower it to let the theme or glass show through |
+| `text_color` | theme | Text color for the card. Titles use it as is; messages and times a softer shade. Groups and alerts can set their own |
 | `width` | fill | e.g. `360px` or `90%` |
 | `card_align` | `left` | Card position when `width` is set |
 | `collapsed_height` | none | Max height of the collapsed stack in px, peeking cards included. Peeks tighten first, then fewer cards peek, then the top card fades out at the bottom |
@@ -137,6 +140,8 @@ groups:
     name: Home               # small label on each card and sub-stack heading
     color: [76, 175, 80]     # [r, g, b] or any CSS color
     icon: mdi:home
+    background_color: [27, 94, 32]   # optional, overrides the card's
+    text_color: "#ffffff"            # optional, overrides the card's
     severity: info
     show_name: true
     stack: true              # fold into a sub-stack in the expanded list
@@ -173,6 +178,7 @@ groups:
 | `conditions` | Extra checks that must all pass: `[{entity, state, state_not, above, below, attribute}]` |
 | `severity` | `critical`, `warning` or `info` (sort order and color) |
 | `color`, `icon` | Override the group or severity look |
+| `background_color`, `text_color` | Override the group's or card's colors for this alert |
 | `title`, `message` | Text with placeholders |
 | `combine` | One notification for all matching entities |
 | `combined_title`, `combined_message` | Text used when 2 or more entities match |
@@ -207,7 +213,7 @@ Both are remembered per device in the browser. An alert stays hidden while nothi
 
 ## Theming
 
-With `card_style: theme` (the default) each notification uses your theme's card styling. The colors for severities and chips, and the built-in look (`card_style: glass`), use these CSS variables, which `styles` can override:
+With `card_style: theme` (the default) each notification uses your theme's card styling, and `background_color` / `text_color` paint over it where you set them (a `background_opacity` below 100 keeps the theme visible underneath). The colors for severities and chips, and the built-in look (`card_style: glass`), use these CSS variables, which `styles` can override:
 
 `--nsc-critical` `--nsc-warning` `--nsc-info` `--nsc-bg` `--nsc-radius` `--nsc-blur` `--nsc-border` `--nsc-shadow` `--nsc-duration`
 

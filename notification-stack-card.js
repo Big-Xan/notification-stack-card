@@ -48,6 +48,9 @@ const DEFAULTS = {
   compact: false,
   card_align: 'left',
   card_style: 'theme',
+  background_color: '',
+  background_opacity: 100,
+  text_color: '',
   max_peek: 2,
   peek_offset: 10,
   message_lines: 2,
@@ -118,6 +121,14 @@ const cssColor = (v) => {
   if (Array.isArray(v) && v.length >= 3) return `rgb(${v.slice(0, 3).map(Number).join(', ')})`;
   return String(v);
 };
+
+/** A background color at an opacity (0-100); full opacity leaves the color as given. */
+const bgAt = (color, opacity) => {
+  const n = Number(opacity);
+  const op = Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 100;
+  return op >= 100 ? color : `color-mix(in srgb, ${color} ${op}%, transparent)`;
+};
+const dimText = (color) => `color-mix(in srgb, ${color} 72%, transparent)`;
 
 const joinNames = (names) => {
   if (names.length <= 1) return names[0] || '';
@@ -391,6 +402,7 @@ const STYLE = `
   background: var(--nsc-bg);
   backdrop-filter: var(--nsc-blur); -webkit-backdrop-filter: var(--nsc-blur);
 }
+.item .bg { position: absolute; inset: 0; background: var(--nsc-card-bg, transparent); border-radius: inherit; pointer-events: none; }
 .item .tint { position: absolute; inset: 0; background: var(--nsc-tint); border-radius: inherit; pointer-events: none; }
 .item.sev-critical { --nsc-accent: var(--nsc-critical); --nsc-tint-amount: 30%; }
 .item.sev-warning { --nsc-accent: var(--nsc-warning); --nsc-tint-amount: 12%; }
@@ -449,13 +461,7 @@ const STYLE = `
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
   mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
 }
-.msg.marquee .mi, .msg.marquee .mi2 { animation: nsc-marquee var(--nsc-scroll-dur, 8s) linear infinite; }
-.item.full .msg .mi2, .item.behind .msg .mi2 { animation: none; }
-@keyframes nsc-marquee {
-  0%, 15% { transform: translateX(0); }
-  100% { transform: translateX(var(--nsc-scroll-dist, 0px)); }
-}
-@media (prefers-reduced-motion: reduce) { .msg.marquee .mi, .msg.marquee .mi2 { animation: none; } }
+.msg.marquee .mi, .msg.marquee .mi2, .msg.scrolling .mi { will-change: transform; }
 
 .ibtns { display: flex; gap: 6px; flex: 0 0 auto; margin: -2px -2px 0 0; }
 .ib {
@@ -503,7 +509,8 @@ const STYLE = `
 
 .empty {
   padding: 14px; text-align: center; font-size: 13px; color: var(--secondary-text-color);
-  border-radius: var(--nsc-radius); border: var(--nsc-border); background: var(--nsc-bg);
+  border-radius: var(--nsc-radius); border: var(--nsc-border);
+  background: linear-gradient(var(--nsc-card-bg, transparent), var(--nsc-card-bg, transparent)), var(--nsc-bg);
   backdrop-filter: var(--nsc-blur); -webkit-backdrop-filter: var(--nsc-blur);
 }
 .empty[hidden] { display: none; }
@@ -574,10 +581,17 @@ class NotificationStackCard extends HTMLElement {
       (cfg.message_overflow === 'scroll' && cfg.scroll_direction === 'horizontal' ? '|h' : '');
     let hash = 0;
     for (const ch of layout) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+    const layoutId = (hash >>> 0).toString(36);
+    // Heights remembered before 0.7.1 could include an opened card, so they start fresh under a new key.
+    try {
+      window.localStorage.removeItem(`nsc-height:${key}:${layoutId}`);
+    } catch (_) {
+      /* blocked storage */
+    }
     this._keys = {
       dismissed: `nsc-dismissed:${key}`,
       snoozed: `nsc-snoozed:${key}`,
-      height: `nsc-height:${key}:${(hash >>> 0).toString(36)}`,
+      height: `nsc-height:${key}:2:${layoutId}`,
     };
     this._dismissed = readStore(this._keys.dismissed);
     this._snoozed = readStore(this._keys.snoozed);
@@ -801,6 +815,8 @@ class NotificationStackCard extends HTMLElement {
       snoozable: (rule.snoozable ?? g?.snoozable ?? dismissible) !== false,
       icon: rule.icon || g?.icon,
       color: cssColor(rule.color ?? g?.color),
+      bg: cssColor(rule.background_color ?? g?.background_color),
+      fg: cssColor(rule.text_color ?? g?.text_color),
       tap_action: rule.tap_action ?? g?.tap_action,
       actions: toList(rule.actions ?? g?.actions),
       snooze_options: rule.snooze_options ?? g?.snooze_options,
@@ -950,6 +966,8 @@ class NotificationStackCard extends HTMLElement {
         b.alerts.push(a);
       } else blocks.push({ alerts: [a] });
     }
+    // With one group and nothing else, folding it would make the opened list look like the closed stack.
+    if (blocks.length === 1 && blocks[0].gid) return alerts.map((a) => ({ alerts: [a] }));
     return blocks;
   }
 
@@ -1026,6 +1044,13 @@ class NotificationStackCard extends HTMLElement {
       ['--nsc-fs-title', cfg.title_font_size],
       ['--nsc-fs-message', cfg.message_font_size],
     ].forEach(([prop, v]) => (cssSize(v) ? this.style.setProperty(prop, cssSize(v)) : this.style.removeProperty(prop)));
+    const bg = cssColor(cfg.background_color);
+    const fg = cssColor(cfg.text_color);
+    [
+      ['--nsc-card-bg', bg && bgAt(bg, cfg.background_opacity)],
+      ['--primary-text-color', fg],
+      ['--secondary-text-color', fg && dimText(fg)],
+    ].forEach(([prop, v]) => (v ? this.style.setProperty(prop, v) : this.style.removeProperty(prop)));
 
     titleRow.addEventListener('click', (ev) => {
       if (ev.target.closest('.snzc')) return;
@@ -1048,9 +1073,9 @@ class NotificationStackCard extends HTMLElement {
     if (window.ResizeObserver) {
       this._ro = new ResizeObserver((entries) => {
         const w = entries[0]?.contentRect?.width || 0;
-        if (w && w !== this._lastW) {
+        if (w !== this._lastW) {
           this._lastW = w;
-          this._layout();
+          if (w) this._layout();
         }
       });
       this._ro.observe(this._stack);
@@ -1061,7 +1086,7 @@ class NotificationStackCard extends HTMLElement {
     if (!this._hass || !this._config || !this._stack) return;
     const alerts = this._computeAlerts();
     const sig =
-      alerts.map((a) => `${a.id}|${a.ts}|${a.severity}|${a.icon}|${a.color}|${a.title}|${a.message}`).join('§') +
+      alerts.map((a) => `${a.id}|${a.ts}|${a.severity}|${a.icon}|${a.color}|${a.bg}|${a.fg}|${a.title}|${a.message}`).join('§') +
       `#${this._expanded}#${[...this._openGroups].join(',')}#${this._confirming || ''}#${this._snoozeOpen || ''}#${this._snoozedCount}`;
     if (sig === this._sig) return;
     this._sig = sig;
@@ -1081,6 +1106,13 @@ class NotificationStackCard extends HTMLElement {
     }
     const live = new Set(this._blocks.filter((b) => b.gid).map((b) => b.gid));
     [...this._openGroups].forEach((gid) => !live.has(gid) && this._openGroups.delete(gid));
+    // Open snooze options or a pending confirm end with their alert, so it comes back closed.
+    if (this._snoozeOpen && !alerts.some((a) => a.id === this._snoozeOpen)) this._snoozeOpen = null;
+    if (/:\d+$/.test(this._confirming || '') && !alerts.some((a) => this._confirming.startsWith(`${a.id}:`))) {
+      this._confirming = null;
+    }
+    // A folded stack never shows an opened card: one tapped open on its own folds back when a second alert arrives.
+    if (!this._expanded && n > 1) this._items.forEach((el) => el.classList.remove('full'));
 
     const chip = cfg.snoozed_position !== 'hidden' && this._snoozedCount > 0;
     const empty = n === 0 && !chip;
@@ -1129,10 +1161,21 @@ class NotificationStackCard extends HTMLElement {
       el.classList.add(`sev-${a.severity}`);
       if (a.color) el.style.setProperty('--nsc-accent', a.color);
       else el.style.removeProperty('--nsc-accent');
+      [
+        ['--nsc-card-bg', a.bg && bgAt(a.bg, cfg.background_opacity)],
+        ['--primary-text-color', a.fg],
+        ['--secondary-text-color', a.fg && dimText(a.fg)],
+      ].forEach(([prop, v]) => (v ? el.style.setProperty(prop, v) : el.style.removeProperty(prop)));
       const html = this._itemHTML(a);
       if (el._html !== html) {
+        el._resume = this._scrollTime(el);
         el.innerHTML = html;
         el._html = html;
+      }
+      const timeEl = el.querySelector('.time');
+      if (timeEl) {
+        const t = relTime(a.ts);
+        if (timeEl.textContent !== t) timeEl.textContent = t;
       }
       seen.add(a.id);
     }
@@ -1213,9 +1256,9 @@ class NotificationStackCard extends HTMLElement {
       snz && !asButton ? `<button class="ib" data-snz-open aria-label="Snooze">${snzIcon}</button>` : '',
       a.dismissible ? '<button class="ib" data-close aria-label="Dismiss"><ha-icon icon="mdi:close"></ha-icon></button>' : '',
     ].join('');
-    const time = cfg.show_time && a.ts ? `<span class="time">${esc(relTime(a.ts))}</span>` : '';
+    const time = cfg.show_time && a.ts ? '<span class="time"></span>' : '';
 
-    return `<div class="tint"></div><div class="content">
+    return `<div class="bg"></div><div class="tint"></div><div class="content">
       <div class="row">
         <div class="icon"><ha-icon icon="${esc(a.icon)}"></ha-icon></div>
         <div class="text">
@@ -1234,7 +1277,8 @@ class NotificationStackCard extends HTMLElement {
   // ---------- layout ----------
 
   _layout() {
-    if (!this._stack) return;
+    // Not rendered (inactive view, closed pop-up): nothing can be measured. The resize observer lays out once visible.
+    if (!this._stack || !this._stack.offsetWidth) return;
     const cfg = this._config;
     const alerts = this._alerts;
     const n = alerts.length;
@@ -1298,8 +1342,11 @@ class NotificationStackCard extends HTMLElement {
       total = cfg.when_empty === 'reserve' && !this.preview ? this._reserveH || pxNumber(cfg.collapsed_height) || 76 : 0;
     } else if (!this._expanded) {
       total = n > 1 ? fold(alerts, 0, pxNumber(cfg.collapsed_height), 'main') : list(alerts, 0) - gap;
-      const opened = [...this._items.values()].some((el) => el.classList.contains('full'));
-      if (!opened && Math.abs(total - this._reserveH) > 1) {
+      // Learn the height only from a closed stack: no card tapped open, no snooze options, no confirm pending,
+      // and not the editor preview, whose width differs from the dashboard's.
+      const opened =
+        !!this._snoozeOpen || !!this._confirming || [...this._items.values()].some((el) => el.classList.contains('full'));
+      if (!opened && !this.preview && Math.abs(total - this._reserveH) > 1) {
         this._reserveH = total;
         writeStore(this._keys.height, { h: total });
       }
@@ -1437,6 +1484,7 @@ class NotificationStackCard extends HTMLElement {
     const scroll = this._config.message_overflow === 'scroll' && !el.classList.contains('full');
     const horizontal = scroll && this._config.scroll_direction === 'horizontal' && !reducedMotion();
     if (!horizontal) {
+      this._stopTicker(msg);
       msg.querySelector('.mi2')?.remove();
       msg.classList.remove('hline', 'marquee');
     }
@@ -1455,6 +1503,24 @@ class NotificationStackCard extends HTMLElement {
       msg.style.setProperty('--nsc-scroll-dur', `${Math.max(4, dist / 15 / 0.64).toFixed(1)}s`);
     }
     if (msg.classList.contains('scrolling') !== on) msg.classList.toggle('scrolling', on);
+    const resume = el._resume;
+    el._resume = null;
+    if (on && resume != null) msg.querySelector('.mi')?.getAnimations?.().forEach((an) => (an.currentTime = resume));
+  }
+
+  /** Where a card's scrolling message is in its loop, so a redraw can carry on from there. */
+  _scrollTime(el) {
+    const mi = el.querySelector('.msg .mi');
+    const an = mi?._tick || mi?.getAnimations?.()[0];
+    const t = an?.currentTime;
+    return Number.isFinite(t) ? t : null;
+  }
+
+  _stopTicker(msg) {
+    msg.querySelectorAll('.mi, .mi2').forEach((e) => {
+      e._tick?.cancel();
+      e._tick = null;
+    });
   }
 
   _fitTicker(msg) {
@@ -1463,19 +1529,43 @@ class NotificationStackCard extends HTMLElement {
     const mi = msg.querySelector('.mi');
     let copy = msg.querySelector('.mi2');
     const on = !!mi && mi.offsetWidth > msg.clientWidth + 1;
-    if (on) {
-      const dist = mi.offsetWidth + 32;
-      msg.style.setProperty('--nsc-scroll-dist', `${-dist}px`);
-      msg.style.setProperty('--nsc-scroll-dur', `${Math.max(5, dist / 40 / 0.85).toFixed(1)}s`);
-      if (!copy || copy.textContent !== mi.textContent) {
-        copy?.remove();
-        copy = mi.cloneNode(true);
-        copy.className = 'mi2';
-        copy.setAttribute('aria-hidden', 'true');
-        msg.appendChild(copy);
-      }
-    } else copy?.remove();
+    const item = msg.closest('.item');
+    const resume = item?._resume;
+    if (item) item._resume = null;
     if (msg.classList.contains('marquee') !== on) msg.classList.toggle('marquee', on);
+    if (!on) {
+      this._stopTicker(msg);
+      copy?.remove();
+      return;
+    }
+    let fresh = false;
+    if (!copy || copy.textContent !== mi.textContent) {
+      copy?.remove();
+      copy = mi.cloneNode(true);
+      copy.className = 'mi2';
+      copy.setAttribute('aria-hidden', 'true');
+      msg.appendChild(copy);
+      fresh = true;
+    }
+    // One loop: hold at the start, then slide by one copy's width at a steady speed. The copy following it
+    // lands exactly where the text began, so the loop has no visible jump, and the hold is the pause.
+    const dist = mi.offsetWidth + 32;
+    if (!fresh && mi._tick && mi._tickDist === dist) return; // already running: leave it alone
+    const hold = 1800;
+    const duration = hold + (dist / 40) * 1000;
+    const at = mi._tick?.currentTime ?? resume ?? 0;
+    this._stopTicker(msg);
+    if (!mi.animate) return;
+    const frames = [
+      { transform: 'translateX(0)', offset: 0 },
+      { transform: 'translateX(0)', offset: hold / duration },
+      { transform: `translateX(${-dist}px)`, offset: 1 },
+    ];
+    [mi, copy].forEach((e) => {
+      e._tick = e.animate(frames, { duration, iterations: Infinity, easing: 'linear' });
+      e._tick.currentTime = at % duration;
+    });
+    mi._tickDist = dist;
   }
 
   _isCut(item) {
@@ -1762,6 +1852,9 @@ const LABELS = {
   collapsed_height: 'Max height when collapsed',
   card_align: 'Card alignment',
   card_style: 'Card look',
+  background_color: 'Card background',
+  background_opacity: 'Background opacity',
+  text_color: 'Text color',
   compact: 'Compact when collapsed',
   max_peek: 'Cards peeking behind',
   peek_offset: 'Peek offset',
@@ -1785,7 +1878,7 @@ const LABELS = {
   persistent_group: 'Group',
   empty_text: 'Empty text',
   storage_key: 'Storage key',
-  styles: 'Custom CSS',
+  styles: 'Custom CSS (Advanced)',
   snooze: 'Allow snoozing',
   snooze_display: 'Snooze control',
   snooze_label: 'Snooze button text',
@@ -1838,6 +1931,9 @@ const HELPERS = {
   compact: 'Hides buttons until the stack is opened, or until a single card is tapped. Keeps the collapsed stack short.',
   group_label: 'Color dot keeps the group color next to the title without the name. The icon uses the group color either way.',
   card_style: 'Match my theme draws each notification as a normal Home Assistant card, so themes like Frosted Glass style it like your other cards.',
+  background_color: 'Leave empty to use your theme. Groups and alerts can set their own.',
+  background_opacity: 'Below 100% the theme or glass shows through, e.g. 40% for a frosted tint.',
+  text_color: 'Titles use it as is; messages and times a little softer. Empty: theme colors.',
   message_overflow: 'Scrolling moves slowly through text past the line limit, then back. Tap a card to show it all.',
   scroll_direction: 'Right to left keeps each message on one line and scrolls it like a ticker. Message lines then doesn\'t apply.',
   zone_person: 'Used when the viewer has no person, e.g. a wall tablet. Groups can override it.',
@@ -1859,11 +1955,11 @@ const GROUP_HELPERS = {
 };
 
 const ALERT_FORM_KEYS = [
-  'id', 'group', 'title', 'message', 'severity', 'icon', 'combine', 'combined_title', 'combined_message',
+  'id', 'group', 'title', 'message', 'severity', 'icon', 'background_color', 'text_color', 'combine', 'combined_title', 'combined_message',
   'state', 'state_not', 'above', 'below', 'attribute', 'conditions', 'dismissible', 'snoozable', 'tap_action',
 ];
 const GROUP_KEYS = [
-  'id', 'name', 'color', 'icon', 'severity', 'show_name', 'stack', 'dismissible', 'snoozable', 'tap_action',
+  'id', 'name', 'color', 'icon', 'background_color', 'text_color', 'severity', 'show_name', 'stack', 'dismissible', 'snoozable', 'tap_action',
   'conditions', 'quiet_hours', 'zones', 'zone_mode', 'zone_person',
 ];
 
@@ -1891,7 +1987,6 @@ const SNOOZE_SCHEMA = [
 const ADVANCED_SCHEMA = [
   { name: 'empty_text', selector: sel.text },
   { name: 'storage_key', selector: sel.text },
-  { name: 'styles', selector: sel.multiline },
 ];
 
 const EDITOR_STYLE = `
@@ -2265,6 +2360,26 @@ class NotificationStackCardEditor extends HTMLElement {
         { name: 'compact', selector: sel.bool },
         grid({ name: 'max_peek', selector: sel.num(0, 5) }, { name: 'peek_offset', selector: sel.num(0, 40, 'px') }),
         grid(
+          {
+            name: 'sort',
+            selector: sel.select([
+              { value: 'severity', label: 'Severity, then newest' },
+              { value: 'time', label: 'Newest first' },
+            ]),
+          },
+          { name: 'auto_collapse', selector: sel.num(0, 600, 's') }
+        ),
+      ]),
+      expandable('g_text', 'Text', 'mdi:format-size', [
+        grid(
+          { name: 'title_font_size', selector: sel.num(8, 40, 'px') },
+          { name: 'message_font_size', selector: sel.num(8, 40, 'px') }
+        ),
+        grid(
+          { name: 'group_font_size', selector: sel.num(6, 30, 'px') },
+          { name: 'header_font_size', selector: sel.num(8, 40, 'px') }
+        ),
+        grid(
           { name: 'message_lines', selector: sel.num(1, 10) },
           {
             name: 'message_overflow',
@@ -2286,34 +2401,24 @@ class NotificationStackCardEditor extends HTMLElement {
             ]
           : []),
         grid(
+          { name: 'show_time', selector: sel.bool },
           {
-            name: 'sort',
+            name: 'group_label',
             selector: sel.select([
-              { value: 'severity', label: 'Severity, then newest' },
-              { value: 'time', label: 'Newest first' },
+              { value: 'name', label: 'Group name' },
+              { value: 'dot', label: 'Color dot only' },
+              { value: 'none', label: 'Nothing' },
             ]),
-          },
-          { name: 'auto_collapse', selector: sel.num(0, 600, 's') }
+          }
         ),
-        { name: 'show_time', selector: sel.bool },
       ]),
-      expandable('g_text', 'Text', 'mdi:format-size', [
+      expandable('g_colors', 'Colors and styling', 'mdi:palette-outline', [
         grid(
-          { name: 'title_font_size', selector: sel.num(8, 40, 'px') },
-          { name: 'message_font_size', selector: sel.num(8, 40, 'px') }
+          { name: 'background_color', selector: sel.color },
+          { name: 'background_opacity', selector: sel.num(0, 100, '%') }
         ),
-        grid(
-          { name: 'group_font_size', selector: sel.num(6, 30, 'px') },
-          { name: 'header_font_size', selector: sel.num(8, 40, 'px') }
-        ),
-        {
-          name: 'group_label',
-          selector: sel.select([
-            { value: 'name', label: 'Group name' },
-            { value: 'dot', label: 'Color dot only' },
-            { value: 'none', label: 'Nothing' },
-          ]),
-        },
+        { name: 'text_color', selector: sel.color },
+        { name: 'styles', selector: sel.multiline },
       ]),
       expandable('g_filter', 'Groups and zones', 'mdi:filter-variant', [
         { name: 'group_stacks', selector: sel.bool },
@@ -2458,6 +2563,7 @@ class NotificationStackCardEditor extends HTMLElement {
     const schema = [
       grid({ name: 'name', selector: sel.text }, { name: 'id', selector: sel.text }),
       grid({ name: 'color', selector: sel.color }, { name: 'icon', selector: sel.icon }),
+      grid({ name: 'background_color', selector: sel.color }, { name: 'text_color', selector: sel.color }),
       { name: 'severity', selector: sel.select([{ value: '__default', label: 'Default (info)' }, ...SEVERITY_OPTIONS]) },
       grid({ name: 'show_name', selector: sel.bool }, { name: 'stack', selector: sel.bool }),
       grid({ name: 'dismissible', selector: sel.bool }, { name: 'snoozable', selector: sel.bool }),
@@ -2486,6 +2592,8 @@ class NotificationStackCardEditor extends HTMLElement {
       name: g.name,
       color: g.color,
       icon: g.icon,
+      background_color: g.background_color,
+      text_color: g.text_color,
       severity: validSeverity(g.severity) || '__default',
       show_name: g.show_name !== false,
       stack: g.stack !== false,
@@ -2506,6 +2614,8 @@ class NotificationStackCardEditor extends HTMLElement {
       if (v.name) g.name = v.name;
       if (!isBlank(v.color)) g.color = v.color;
       if (v.icon) g.icon = v.icon;
+      if (!isBlank(v.background_color)) g.background_color = v.background_color;
+      if (!isBlank(v.text_color)) g.text_color = v.text_color;
       if (validSeverity(v.severity)) g.severity = v.severity;
       if (v.show_name === false) g.show_name = false;
       if (v.stack === false) g.stack = false;
@@ -2608,6 +2718,7 @@ class NotificationStackCardEditor extends HTMLElement {
         },
         { name: 'icon', selector: sel.icon }
       ),
+      grid({ name: 'background_color', selector: sel.color }, { name: 'text_color', selector: sel.color }),
       ...(multi
         ? [
             { name: 'combine', selector: sel.bool },
@@ -2648,6 +2759,8 @@ class NotificationStackCardEditor extends HTMLElement {
       message: rule.message,
       severity: validSeverity(rule.severity) || '__default',
       icon: rule.icon,
+      background_color: rule.background_color,
+      text_color: rule.text_color,
       combine: !!rule.combine,
       combined_title: rule.combined_title,
       combined_message: rule.combined_message,
@@ -2677,6 +2790,8 @@ class NotificationStackCardEditor extends HTMLElement {
     put('message', v.message);
     if (validSeverity(v.severity)) r.severity = v.severity;
     put('icon', v.icon);
+    put('background_color', v.background_color);
+    put('text_color', v.text_color);
     if (v.combine) {
       r.combine = true;
       put('combined_title', v.combined_title);

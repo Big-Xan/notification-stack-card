@@ -2,7 +2,14 @@
 
 ## 0.7.0 — 2026-11-01
 
-- **`scroll_direction`**: with `message_overflow: scroll`, choose `vertical` (up through the lines, as before) or `horizontal`, which keeps each message on one line and scrolls it right to left like a ticker, looping seamlessly. Set it in the editor under Size and layout once Longer messages is set to Scroll. With reduced motion turned on, horizontal messages stay still.
+- **`scroll_direction`**: with `message_overflow: scroll`, choose `vertical` (up through the lines, as before) or `horizontal`, which keeps each message on one line and scrolls it right to left like a ticker. It loops seamlessly with a short pause each time the text comes back around. Set it in the editor under Text once Longer messages is set to Scroll. With reduced motion turned on, horizontal messages stay still.
+- **Colors**: `background_color`, `background_opacity` and `text_color` on the card, in a new Colors and styling section of the editor. Groups and alerts can set their own `background_color` and `text_color`. The severity tint still shows on top.
+- **Editor**: message lines, longer messages, scroll direction and show time moved to the Text section; Custom CSS moved to Colors and styling, marked (Advanced).
+- **Fix**: scrolling messages no longer restart every minute when the card's time label changes; after any redraw they carry on from where they were.
+- **Fix**: when the only alerts showing belong to one group, opening the stack lists them right away instead of showing a folded sub-stack first.
+- **Fix**: snoozing a single card could leave the empty space as tall as the card with its snooze options open (`when_empty: reserve`). The remembered height is now learned only from a closed stack, and heights remembered by earlier versions are discarded once.
+- **Fix**: a card in a hidden view or closed pop-up could remember a near-zero height or stay collapsed when shown again; it now measures once visible. The editor preview no longer overwrites the dashboard card's remembered height.
+- **Fix**: snooze options or a pending confirm close with their alert, and a card tapped open on its own folds back when a second alert arrives.
 
 ## 0.6.3 — 2026-10-31
 
