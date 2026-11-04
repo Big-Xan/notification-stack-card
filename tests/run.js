@@ -179,19 +179,24 @@ test('G7 invalid action name keeps the alert and says why', async (lockCard) => 
 }, (r) => r.shown.length === 1 && r.toasts.length === 1 && /isn't a valid action/.test(r.toasts[0]) && !r.unhandled.length,
   { alerts: [{ id: 'lock', entity: 'lock.front', state: 'unlocked', actions: [{ name: 'Lock', dismiss: true, tap_action: { action: 'perform-action', perform_action: 'locklock' } }] }] });
 
-test('G8 a request that never answers frees the button after the cap', async (lockCard) => {
+test('G8 the button stays busy until Home Assistant answers, however long', async (lockCard) => {
   const real = window.setTimeout;
-  window.setTimeout = (fn, ms, ...a) => real(fn, ms === 30000 ? 30 : ms, ...a);
+  window.setTimeout = (fn, ms, ...a) => real(fn, ms >= 30000 ? 30 : ms, ...a); // a 30 s timer would fire now
   try {
-    const hass = makeHass({ 'lock.front': st('lock.front', 'unlocked') }, { callService: () => new Promise(() => {}) });
+    let resolve;
+    const hass = makeHass({ 'lock.front': st('lock.front', 'unlocked') }, { callService: () => new Promise((r) => (resolve = r)) });
     const el = mount(lockCard, hass);
     el.shadowRoot.querySelector('[data-act]').click();
-    await tick(10);
-    const busy = el.shadowRoot.querySelector('[data-act]').disabled;
     await tick(60);
-    return { busy, freed: !el.shadowRoot.querySelector('[data-act]').disabled, shown: ids(el) };
+    const btn = el.shadowRoot.querySelector('[data-act]');
+    const busy = btn.disabled;
+    el._onActionButton(el._alerts[0], 0);
+    const calls = hass.calls.length;
+    resolve({ context: {} });
+    await tick(10);
+    return { busy, calls, shown: ids(el) };
   } finally { window.setTimeout = real; }
-}, (r) => eq(r, { busy: true, freed: true, shown: ['lock:lock.front'] }), lockCard());
+}, (r) => eq(r, { busy: true, calls: 1, shown: [] }), lockCard());
 
 test('A3 a template that fails to load keeps its dismissals', async (DOOR) => {
   localStorage.setItem('nsc-dismissed:A3', JSON.stringify({ 'door:binary_sensor.door': ['binary_sensor.door@2026-11-01T10:00:00Z'] }));
@@ -236,11 +241,11 @@ test('I quiet hours and zones keep a dismissal; conditions off/on bring it back'
   return { afterQuiet, afterZone, afterRearm: ids(el) };
 }, (r) => eq(r, { afterQuiet: [], afterZone: [], afterRearm: ['w:binary_sensor.w'] }));
 
-test('I2 dismissal for a deleted alert is pruned', async () => {
+test('I2 a dismissal this card can\'t produce is left alone (another card\'s, or a removed alert)', async () => {
   localStorage.setItem('nsc-dismissed:I2', JSON.stringify({ 'gone:binary_sensor.x': ['binary_sensor.x@1'] }));
   mount({ storage_key: 'I2', alerts: [] }, makeHass({}));
   return localStorage.getItem('nsc-dismissed:I2');
-}, (r) => r === '{}');
+}, (r) => r === '{"gone:binary_sensor.x":["binary_sensor.x@1"]}');
 
 test('I3 entity change still brings a dismissed alert back', async () => {
   const hass = makeHass({ 'binary_sensor.w': st('binary_sensor.w', 'on') });
@@ -628,6 +633,139 @@ test('R10 editor round-trip keeps keys it does not show', async () => {
   form.emit({ ...form.data, title: 'New' });
   return { forms: ed.shadowRoot.querySelectorAll('ha-form').length, out };
 }, (r) => r.forms > 0 && r.out?.title === 'New' && r.out.unknown_key === 7 && r.out.alerts[0].custom === 1);
+
+// ---------- 0.9.2: shared storage, failed actions, hidden rules ----------
+test('Y1 another card on the same key keeps this card\'s dismissals', async () => {
+  const hass = makeHass({ 'binary_sensor.door': st('binary_sensor.door', 'on'), 'binary_sensor.window': st('binary_sensor.window', 'on') });
+  const A = { storage_key: 'same', alerts: [{ id: 'door', entity: 'binary_sensor.door' }] };
+  let a = mount(A, hass);
+  a._dismiss(a._alerts[0]);
+  mount({ storage_key: 'same', alerts: [{ id: 'window', entity: 'binary_sensor.window' }] }, hass);
+  const afterB = Object.keys(JSON.parse(localStorage.getItem('nsc-dismissed:same')));
+  a.remove();
+  a = mount(A, hass);
+  return { afterB, reloadedA: ids(a) };
+}, (r) => eq(r, { afterB: ['door:binary_sensor.door'], reloadedA: [] }));
+
+test('Y2 the card-picker preview (starter config, default key) keeps dismissals', async () => {
+  const hass = makeHass({ 'binary_sensor.door': st('binary_sensor.door', 'on') });
+  const a = mount({ alerts: [{ id: 'door', entity: 'binary_sensor.door' }] }, hass);
+  a._dismiss(a._alerts[0]);
+  const p = document.createElement('notification-stack-card');
+  p.preview = true;
+  p.setConfig(customElements.get('notification-stack-card').getStubConfig());
+  document.body.appendChild(p);
+  p.hass = hass;
+  return Object.keys(JSON.parse(localStorage.getItem('nsc-dismissed:default')));
+}, (r) => eq(r, ['door:binary_sensor.door']));
+
+test('Y3 unnamed alerts in two cards (both r0) keep each other\'s dismissals', async () => {
+  const hass = makeHass({ 'binary_sensor.door': st('binary_sensor.door', 'on'), 'binary_sensor.window': st('binary_sensor.window', 'off') });
+  const a = mount({ alerts: [{ entity: 'binary_sensor.door' }] }, hass);
+  a._dismiss(a._alerts[0]);
+  mount({ alerts: [{ entity: 'binary_sensor.window' }] }, hass);
+  return Object.keys(JSON.parse(localStorage.getItem('nsc-dismissed:default')));
+}, (r) => eq(r, ['r0:binary_sensor.door']));
+
+test('Y4 two cards on one key: both dismissals and snoozes are kept, and each card shows the other\'s', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'on'), 'binary_sensor.c': st('binary_sensor.c', 'on'), 'binary_sensor.d': st('binary_sensor.d', 'on') });
+  const cfg = { storage_key: 'y4', alerts: ['a', 'b', 'c', 'd'].map((x) => ({ id: x, entity: `binary_sensor.${x}` })) };
+  const one = mount(cfg, hass);
+  const two = mount(cfg, hass);
+  const find = (el, x) => el._alerts.find((al) => al.id === `${x}:binary_sensor.${x}`);
+  one._dismiss(find(one, 'a'));
+  two._dismiss(find(two, 'b'));
+  one._snooze(one._items.get('c:binary_sensor.c'), find(one, 'c'), 0);
+  two._snooze(two._items.get('d:binary_sensor.d'), find(two, 'd'), 0);
+  await tick(300);
+  return {
+    dismissed: Object.keys(JSON.parse(localStorage.getItem('nsc-dismissed:y4'))).sort(),
+    snoozed: Object.keys(JSON.parse(localStorage.getItem('nsc-snoozed:y4'))).sort(),
+    one: ids(one), two: ids(two),
+  };
+}, (r) => eq(r, { dismissed: ['a:binary_sensor.a', 'b:binary_sensor.b'], snoozed: ['c:binary_sensor.c', 'd:binary_sensor.d'], one: [], two: [] }));
+
+test('Y5 a dismissal made in another tab shows here', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on') });
+  const el = mount({ storage_key: 'y5', alerts: [{ id: 'a', entity: 'binary_sensor.a' }] }, hass);
+  const before = ids(el);
+  localStorage.setItem('nsc-dismissed:y5', JSON.stringify({ 'a:binary_sensor.a': ['binary_sensor.a@2026-11-01T10:00:00Z'] }));
+  window.dispatchEvent(new StorageEvent('storage', { key: 'nsc-dismissed:y5' }));
+  return { before, after: ids(el) };
+}, (r) => eq(r, { before: ['a:binary_sensor.a'], after: [] }));
+
+test('Y6 Unsnooze all clears only this card\'s snoozes', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on') });
+  localStorage.setItem('nsc-snoozed:y6', JSON.stringify({ 'other:binary_sensor.z': { until: Date.now() + 3600e3, tokens: ['binary_sensor.z@1'] } }));
+  const el = mount({ storage_key: 'y6', alerts: [{ id: 'a', entity: 'binary_sensor.a' }] }, hass);
+  el._snooze(el._items.get('a:binary_sensor.a'), el._alerts[0], 0);
+  await tick(300);
+  el._confirming = 'unsnooze';
+  el._onUnsnoozeAll();
+  return { stored: Object.keys(JSON.parse(localStorage.getItem('nsc-snoozed:y6'))), shown: ids(el) };
+}, (r) => eq(r, { stored: ['other:binary_sensor.z'], shown: ['a:binary_sensor.a'] }));
+
+const syncBtn = async (tap) => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on') });
+  const el = mount({ alerts: [{ id: 'a', entity: 'binary_sensor.a', actions: [{ name: 'Go', dismiss: true, tap_action: tap }] }] }, hass);
+  await el._onActionButton(el._alerts[0], 0);
+  return { shown: ids(el), label: el.shadowRoot.querySelector('[data-act]')?.textContent.trim() };
+};
+test('Y7 a refused javascript: link keeps the alert and shows Failed', syncBtn, (r) => eq(r, { shown: ['a:binary_sensor.a'], label: 'Failed' }), { action: 'url', url_path: 'javascript:alert(1)' });
+test('Y8 navigate without a path keeps the alert', syncBtn, (r) => eq(r, { shown: ['a:binary_sensor.a'], label: 'Failed' }), { action: 'navigate' });
+test('Y9 an unknown action keeps the alert', syncBtn, (r) => eq(r, { shown: ['a:binary_sensor.a'], label: 'Failed' }), { action: 'fire-dom-event' });
+test('Y10 action: none with dismiss still dismisses', syncBtn, (r) => eq(r.shown, []), { action: 'none' });
+
+test('Y11 conditions off/on during quiet hours count as a new incident', async () => {
+  const states = { 'binary_sensor.w': st('binary_sensor.w', 'on'), 'input_boolean.arm': st('input_boolean.arm', 'on') };
+  const hass = makeHass(states);
+  const el = mount({ groups: [{ id: 'g' }], alerts: [{ id: 'w', group: 'g', entity: 'binary_sensor.w', conditions: [{ entity: 'input_boolean.arm', state: 'on' }] }] }, hass);
+  el._dismiss(el._alerts[0]);
+  const g = el._groups.get('g');
+  g.quiet_hours = { start: '00:00', end: '23:59' };
+  el.hass = { ...hass, states: { ...states, 'input_boolean.arm': st('input_boolean.arm', 'off') } };
+  el.hass = { ...hass, states };
+  g.quiet_hours = undefined; el._refresh();
+  return ids(el);
+}, (r) => eq(r, ['w:binary_sensor.w']));
+
+test('Y12 an entity change while hidden by show_groups brings it back; no change keeps it dismissed', async () => {
+  const states = { 'binary_sensor.w': st('binary_sensor.w', 'on') };
+  const hass = makeHass(states);
+  const cfg = { storage_key: 'y12', groups: [{ id: 'g' }, { id: 'h' }], alerts: [{ id: 'w', group: 'g', entity: 'binary_sensor.w' }] };
+  const el = mount(cfg, hass);
+  el._dismiss(el._alerts[0]);
+  const other = mount({ ...cfg, show_groups: ['h'] }, hass); // same alerts, shows a different group
+  const kept = Object.keys(JSON.parse(localStorage.getItem('nsc-dismissed:y12')));
+  other.hass = { ...hass, states: { 'binary_sensor.w': st('binary_sensor.w', 'on', {}, '2026-11-02T10:00:00Z') } };
+  return { kept, afterChange: localStorage.getItem('nsc-dismissed:y12') };
+}, (r) => eq(r, { kept: ['w:binary_sensor.w'], afterChange: '{}' }));
+
+test('Y13 reconfiguring mid-request: the new button isn\'t busy and doesn\'t show Failed', async () => {
+  let reject;
+  const hass = makeHass({ 'lock.l': st('lock.l', 'unlocked') }, { callService: () => new Promise((_, j) => (reject = j)) });
+  const btn = (name, svc) => ({ alerts: [{ id: 'l', entity: 'lock.l', state: 'unlocked', actions: [{ name, tap_action: { action: 'perform-action', perform_action: svc } }] }] });
+  const el = mount(btn('Lock', 'lock.lock'), hass);
+  el.shadowRoot.querySelector('[data-act]').click();
+  await tick(5);
+  el.setConfig(btn('Notify', 'notify.notify'));
+  const busy = el.shadowRoot.querySelector('[data-act]').disabled;
+  reject(new Error('x'));
+  await tick(10);
+  return { busy, label: el.shadowRoot.querySelector('[data-act]').textContent.trim() };
+}, (r) => eq(r, { busy: false, label: 'Notify' }));
+
+test('Y14 combined alert with fixed text: a window closing and reopening still behaves', async () => {
+  const s = { 'binary_sensor.a': st('binary_sensor.a', 'on', {}, '2026-11-01T12:00:00Z'), 'binary_sensor.b': st('binary_sensor.b', 'on', {}, '2026-11-01T10:00:00Z') };
+  const hass = makeHass(s);
+  const el = mount({ alerts: [{ id: 'w', entities: ['binary_sensor.a', 'binary_sensor.b'], combine: true, combined_title: 'Windows', combined_message: 'open' }] }, hass);
+  const closed = { ...s, 'binary_sensor.b': st('binary_sensor.b', 'off', {}, '2026-11-01T13:00:00Z') };
+  el.hass = { ...hass, states: closed };
+  el._dismiss(el._alerts[0]);
+  const hidden = ids(el).length === 0;
+  el.hass = { ...hass, states: { ...closed, 'binary_sensor.b': st('binary_sensor.b', 'on', {}, '2026-11-01T14:00:00Z') } };
+  return { hidden, back: ids(el) };
+}, (r) => eq(r, { hidden: true, back: ['w:combined'] }));
 
 (async () => {
   const { browser, page, errors } = await open(SRC);
