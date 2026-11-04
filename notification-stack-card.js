@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.7.0
+ * notification-stack-card.js  v0.8.0
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -8,11 +8,13 @@
  * groups, alerts and snooze options as a template that other cards reuse.
  *
  * Dismiss and snooze are stored per device (localStorage). A dismissed or snoozed alert
- * comes back when something new happens: an entity changes state again or a new entity
- * joins a combined alert. Persistent notifications are dismissed in Home Assistant.
+ * comes back when something new happens: an entity changes state again, a new entity
+ * joins a combined alert, or the alert's conditions turn off and on again. Quiet hours and
+ * zones only hide alerts, so they keep a dismissal. Persistent notifications are dismissed
+ * in Home Assistant.
  */
 
-const NSC_VERSION = '0.7.0';
+const NSC_VERSION = '0.8.0';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -130,6 +132,12 @@ const bgAt = (color, opacity) => {
 };
 const dimText = (color) => `color-mix(in srgb, ${color} 72%, transparent)`;
 
+/** Links that would run code in the dashboard (javascript:, data:, vbscript:) are refused; others pass. */
+const safeUrl = (u) => {
+  const s = String(u ?? '').trim();
+  return s && !/^(javascript|data|vbscript):/i.test(s.replace(/[\u0000-\u0020]/g, '')) ? s : '';
+};
+
 const joinNames = (names) => {
   if (names.length <= 1) return names[0] || '';
   if (names.length === 2) return `${names[0]} and ${names[1]}`;
@@ -155,9 +163,11 @@ function relTime(ts, long = false) {
   return long ? `${d} d ago` : `${d}d`;
 }
 
+/** "HH:MM" (seconds allowed) -> minutes after midnight, or null if it isn't a valid 24-hour time. */
 const minutesOf = (t) => {
   const m = String(t ?? '').match(/^(\d{1,2}):(\d{2})/);
-  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
 };
 
 /** True while `now` is inside a {start, end} window; windows may cross midnight. */
@@ -483,6 +493,11 @@ const STYLE = `
 }
 .act span { overflow: hidden; text-overflow: ellipsis; }
 .act.confirm { background: var(--nsc-accent); color: #fff; }
+.act.busy { opacity: 0.6; cursor: progress; }
+.act.busy ha-icon { animation: nsc-busy 0.9s ease-in-out infinite alternate; }
+@keyframes nsc-busy { to { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .act.busy ha-icon { animation: none; } }
+.act.failed { background: var(--nsc-critical); color: #fff; }
 .act ha-icon { --mdc-icon-size: 18px; flex: 0 0 auto; }
 .actions.snz { padding-left: 0; flex-wrap: nowrap; align-items: flex-start; }
 .snz .opts { display: flex; flex-wrap: wrap; gap: 8px; flex: 1 1 auto; min-width: 0; }
@@ -529,6 +544,8 @@ class NotificationStackCard extends HTMLElement {
     this._pn = {};
     this._pnSub = null;
     this._pnFailed = false;
+    this._busy = new Map(); // "alertId:button" -> token of the request in flight
+    this._failed = null; // "alertId:button" that just failed, shown briefly
     this._sig = '';
     this._snoozedCount = 0;
     this._drag = null;
@@ -597,10 +614,18 @@ class NotificationStackCard extends HTMLElement {
     this._snoozed = readStore(this._keys.snoozed);
     this._reserveH = Number(readStore(this._keys.height).h) || 0;
 
-    this._tplData = [];
-    this._tplErrors = [];
+    // Keep already-loaded templates while the list is unchanged (editor typing), so their alerts don't flicker.
+    const refsKey = JSON.stringify([toList(cfg.templates), cfg.template_name]);
+    if (refsKey !== this._tplRefsKey || !this._tplData) {
+      this._tplData = [];
+      this._tplErrors = [];
+    }
+    this._tplRefsKey = refsKey;
     this._tplRequested = false;
     this._rebuildDefinition();
+
+    this._pnFailed = false;
+    if (!cfg.persistent_notifications) this._unsubscribePN();
 
     this._expanded = false;
     this._openGroups = new Set();
@@ -625,6 +650,7 @@ class NotificationStackCard extends HTMLElement {
   }
 
   connectedCallback() {
+    this._pnFailed = false;
     this._maybeSubscribe();
     TemplateStore.listeners.add(this._tplListener);
     if (!this._timer) this._timer = setInterval(() => this._refresh(), 60000);
@@ -635,12 +661,10 @@ class NotificationStackCard extends HTMLElement {
     this._watchOutside(false);
     clearInterval(this._timer);
     this._timer = null;
-    [this._acTimer, this._confirmTimer, this._wakeTimer].forEach(clearTimeout);
+    [this._acTimer, this._confirmTimer, this._wakeTimer, this._failTimer].forEach(clearTimeout);
+    this._failed = null;
     TemplateStore.listeners.delete(this._tplListener);
-    if (this._pnSub) {
-      this._pnSub.then((unsub) => unsub && unsub()).catch(() => {});
-      this._pnSub = null;
-    }
+    this._unsubscribePN();
   }
 
   _refresh() {
@@ -651,16 +675,18 @@ class NotificationStackCard extends HTMLElement {
   // ---------- definition (templates + local) ----------
 
   _loadTemplates() {
-    if (!this._hass?.callWS) return;
-    this._tplRequested = true;
+    // A new request (or none at all) makes any request still in flight stale.
+    const token = (this._tplToken = (this._tplToken || 0) + 1);
     const own = this._config.template_name;
     const refs = toList(this._config.templates).filter((r) => {
       const p = parseTemplateRef(r);
       return p && !(own && p.name === own && p.dashboard === dashKey(currentDashboard()));
     });
+    this._tplSettled = !refs.length;
+    if (!this._hass?.callWS) return;
+    this._tplRequested = true;
     if (!refs.length) return;
     TemplateStore.watch(this._hass);
-    const token = (this._tplToken = (this._tplToken || 0) + 1);
     Promise.all(
       refs.map((r) => TemplateStore.resolve(this._hass, r).catch((e) => ({ error: String(e?.message || e), ref: r })))
     ).then((res) => {
@@ -668,28 +694,37 @@ class NotificationStackCard extends HTMLElement {
       this._tplData = res.filter((x) => !x.error);
       this._tplErrors = res.filter((x) => x.error);
       this._tplErrors.forEach((e) => console.warn(`notification-stack-card: ${e.error}`));
+      // Only a complete load can tell a deleted alert from one whose template didn't load this time.
+      this._tplSettled = !this._tplErrors.length;
       this._rebuildDefinition();
       this._refresh();
     });
   }
 
-  /** Merge template groups/alerts/snooze options with this card's own; the card's own win. */
+  /**
+   * Merge template groups/alerts/snooze options with this card's own; the card's own win, and between
+   * templates the later one wins when IDs match.
+   */
   _rebuildDefinition() {
     const groups = new Map();
-    const fromTemplates = [];
+    const tplRules = new Map();
     let tplSnooze;
     this._tplData.forEach((t, ti) => {
       t.groups.forEach((g) => groups.set(g.id, g));
-      t.alerts.forEach((r, i) => fromTemplates.push({ ...r, __id: r.id || `t${ti}r${i}` }));
+      t.alerts.forEach((r, i) => {
+        const id = r.id ? String(r.id) : `t${ti}r${i}`;
+        tplRules.delete(id);
+        tplRules.set(id, { ...r, __id: id });
+      });
       if (!tplSnooze && normalizeSnooze(t.snooze_options).length) tplSnooze = normalizeSnooze(t.snooze_options);
     });
     normalizeGroups(this._raw.groups).forEach((g, id) => groups.set(id, g));
     const local = toList(this._raw.alerts)
       .filter(isObj)
-      .map((r, i) => ({ ...r, __id: r.id || `r${i}` }));
+      .map((r, i) => ({ ...r, __id: r.id ? String(r.id) : `r${i}` }));
     const localIds = new Set(local.map((r) => r.__id));
     this._groups = groups;
-    this._rules = [...fromTemplates.filter((r) => !localIds.has(r.__id)), ...local];
+    this._rules = [...[...tplRules.values()].filter((r) => !localIds.has(r.__id)), ...local];
     const own = normalizeSnooze(this._raw.snooze_options);
     this._snoozeOptions = own.length ? own : tplSnooze || DEFAULT_SNOOZE;
   }
@@ -709,10 +744,17 @@ class NotificationStackCard extends HTMLElement {
     });
   }
 
+  _unsubscribePN() {
+    if (!this._pnSub) return;
+    this._pnSub.then((unsub) => unsub && unsub()).catch(() => {});
+    this._pnSub = null;
+    this._pn = {};
+  }
+
   _onPN(msg) {
     const n = (msg && msg.notifications) || {};
-    if (msg.type === 'current') this._pn = { ...n };
-    else if (msg.type === 'removed') Object.keys(n).forEach((id) => delete this._pn[id]);
+    if (msg?.type === 'current') this._pn = { ...n };
+    else if (msg?.type === 'removed') Object.keys(n).forEach((id) => delete this._pn[id]);
     else this._pn = { ...this._pn, ...n };
     this._refresh();
   }
@@ -720,6 +762,7 @@ class NotificationStackCard extends HTMLElement {
   // ---------- rules ----------
 
   _test(val, c) {
+    if (val === undefined || val === null) return false; // missing attribute
     const hasState = c.state !== undefined;
     const hasNot = c.state_not !== undefined;
     const hasNum = c.above !== undefined || c.below !== undefined;
@@ -732,6 +775,7 @@ class NotificationStackCard extends HTMLElement {
     }
     if (hasNot && toList(c.state_not).map(String).includes(s)) return false;
     if (hasNum) {
+      if (s.trim() === '') return false;
       const n = Number(val);
       if (!Number.isFinite(n)) return false;
       if (c.above !== undefined && !(n > Number(c.above))) return false;
@@ -751,7 +795,8 @@ class NotificationStackCard extends HTMLElement {
   _viewerPerson() {
     const uid = this._hass.user?.id;
     if (!uid) return '';
-    if (this._viewer?.uid !== uid) {
+    // A miss isn't remembered, so a person linked to this user later is found without a reload.
+    if (this._viewer?.uid !== uid || !this._viewer.id || this._hass.states[this._viewer.id]?.attributes.user_id !== uid) {
       const id = Object.keys(this._hass.states).find(
         (e) => e.startsWith('person.') && this._hass.states[e].attributes.user_id === uid
       );
@@ -831,15 +876,20 @@ class NotificationStackCard extends HTMLElement {
     const now = new Date();
     const filter = toList(cfg.show_groups).map(String);
     const listed = (g) => !filter.length || (g ? filter.includes(g.id) : cfg.show_ungrouped !== false);
+    const groupOk = (g) => !g?.conditions || this._conditionsPass(g.conditions);
     const out = [];
+    // Rules checked against their conditions and entities. Ones only hidden by the group filter, a zone or
+    // quiet hours aren't in here, so their dismissals are kept for when they show again.
+    const evaluated = new Set();
 
     for (const rule of this._rules) {
       const g = rule.group ? this._groups.get(String(rule.group)) : undefined;
       if (!listed(g) || !this._zoneAllows(g)) continue;
-      if (g?.conditions && !this._conditionsPass(g.conditions)) continue;
-      if (rule.conditions && !this._conditionsPass(rule.conditions)) continue;
       const base = this._inherit(rule, g);
       if (this._quietBlocks(g, base.severity, now)) continue;
+      evaluated.add(rule.__id);
+      if (!groupOk(g)) continue;
+      if (rule.conditions && !this._conditionsPass(rule.conditions)) continue;
 
       const hits = [];
       const ents = rule.entities ? toList(rule.entities) : toList(rule.entity);
@@ -883,7 +933,7 @@ class NotificationStackCard extends HTMLElement {
     if (cfg.persistent_notifications) {
       const g = cfg.persistent_group ? this._groups.get(String(cfg.persistent_group)) : undefined;
       const base = this._inherit({ severity: this._raw.persistent_severity, icon: this._raw.persistent_icon }, g);
-      const allowed = listed(g) && this._zoneAllows(g) && !this._quietBlocks(g, base.severity, now);
+      const allowed = listed(g) && this._zoneAllows(g) && groupOk(g) && !this._quietBlocks(g, base.severity, now);
       for (const n of allowed ? Object.values(this._pn) : []) {
         if (!n || !n.notification_id) continue;
         out.push({
@@ -901,15 +951,31 @@ class NotificationStackCard extends HTMLElement {
       }
     }
 
+    // The same key twice (duplicate IDs in YAML) would share one card: keep the first.
+    const active = new Map();
+    for (let i = 0; i < out.length; i += 1) {
+      if (!active.has(out[i].id)) active.set(out[i].id, out[i]);
+      else {
+        if (!this._dupWarned) console.warn(`notification-stack-card: duplicate alert "${out[i].id}"; give each alert its own id`);
+        this._dupWarned = true;
+        out.splice(i--, 1);
+      }
+    }
+
     // Dismissed / snoozed: hidden while every current token was already seen.
     const nowMs = now.getTime();
-    const active = new Map(out.map((a) => [a.id, a]));
     const covered = (seen, a) => Array.isArray(seen) && a.tokens.every((t) => seen.includes(t));
+    const ruleIds = new Set(this._rules.map((r) => r.__id));
+    const ruleOf = (id) => id.slice(0, id.lastIndexOf(':'));
+    // A dismissal ends when its alert shows with something new, or its rule was checked and nothing matched.
+    // One for a rule that's gone is dropped once templates have loaded.
+    const ended = (id, a) =>
+      a ? !covered(this._dismissed[id], a) : evaluated.has(ruleOf(id)) || (this._tplSettled && !ruleIds.has(ruleOf(id)));
     let dChanged = false;
     let sChanged = false;
     for (const id of Object.keys(this._dismissed)) {
       const a = active.get(id);
-      if (!a || !covered(this._dismissed[id], a)) {
+      if (ended(id, a)) {
         delete this._dismissed[id];
         dChanged = true;
       }
@@ -986,7 +1052,7 @@ class NotificationStackCard extends HTMLElement {
     const root = this.shadowRoot;
     root.innerHTML = `
       <style>${STYLE}</style>
-      <style>${cfg.styles || ''}</style>
+      <style class="user-css"></style>
       <div class="wrap">
         <div class="header" hidden><div class="htitle"></div><div class="hbtns"></div></div>
         <div class="scroller"><div class="stack no-anim"></div></div>
@@ -994,6 +1060,7 @@ class NotificationStackCard extends HTMLElement {
         <div class="empty" hidden></div>
       </div>`;
     const $ = (s) => root.querySelector(s);
+    $('.user-css').textContent = cfg.styles || '';
     this._wrap = $('.wrap');
     this._header = $('.header');
     this._footer = $('.footer');
@@ -1087,7 +1154,8 @@ class NotificationStackCard extends HTMLElement {
     const alerts = this._computeAlerts();
     const sig =
       alerts.map((a) => `${a.id}|${a.ts}|${a.severity}|${a.icon}|${a.color}|${a.bg}|${a.fg}|${a.title}|${a.message}`).join('§') +
-      `#${this._expanded}#${[...this._openGroups].join(',')}#${this._confirming || ''}#${this._snoozeOpen || ''}#${this._snoozedCount}`;
+      `#${this._expanded}#${[...this._openGroups].join(',')}#${this._confirming || ''}#${this._snoozeOpen || ''}#${this._snoozedCount}` +
+      `#${[...this._busy.keys()].join(',')}#${this._failed || ''}`;
     if (sig === this._sig) return;
     this._sig = sig;
     this._alerts = alerts;
@@ -1241,9 +1309,14 @@ class NotificationStackCard extends HTMLElement {
       const buttons = a.actions
         .map((b, j) => {
           if (!b) return '';
-          const confirming = this._confirming === `${a.id}:${j}`;
-          const label = confirming ? b.confirm_text || 'Confirm?' : b.name || '';
-          return `<button class="act${confirming ? ' confirm' : ''}" data-act="${j}">${
+          const key = `${a.id}:${j}`;
+          const confirming = this._confirming === key;
+          const busy = this._busy.has(key);
+          const failed = this._failed === key;
+          const label = confirming ? b.confirm_text || 'Confirm?' : failed ? 'Failed' : b.name || '';
+          const cls = `act${confirming ? ' confirm' : ''}${busy ? ' busy' : ''}${failed ? ' failed' : ''}`;
+          const attrs = `${busy ? ' disabled aria-busy="true"' : ''}${label ? '' : ` aria-label="${esc(`Action ${j + 1}`)}"`}`;
+          return `<button class="${cls}" data-act="${j}"${attrs}>${
             b.icon ? `<ha-icon icon="${esc(b.icon)}"></ha-icon>` : ''
           }${label ? `<span>${esc(label)}</span>` : ''}</button>`;
         })
@@ -1291,7 +1364,8 @@ class NotificationStackCard extends HTMLElement {
       H.set(a.id, el?.querySelector('.content')?.offsetHeight || 0);
     });
     const gap = 8;
-    const peek = Number(cfg.peek_offset) || 10;
+    const peekRaw = isBlank(cfg.peek_offset) ? NaN : Number(cfg.peek_offset);
+    const peek = Number.isFinite(peekRaw) ? Math.max(0, peekRaw) : 10;
     const maxPeek = Math.max(0, Number(cfg.max_peek) || 0);
     let z = 1000;
     let total = 0;
@@ -1304,7 +1378,7 @@ class NotificationStackCard extends HTMLElement {
       let off = peek;
       let clip = 0;
       if (limit) {
-        if (peekN && h0 + peekN * off > limit) off = Math.max(6, Math.min(off, Math.floor((limit - h0) / peekN)));
+        if (peekN && h0 + peekN * off > limit) off = Math.max(Math.min(6, peek), Math.min(off, Math.floor((limit - h0) / peekN)));
         while (peekN > 1 && h0 + peekN * off > limit) peekN -= 1;
         if (h0 + peekN * off > limit) {
           h0 = Math.max(48, limit - peekN * off);
@@ -1453,7 +1527,8 @@ class NotificationStackCard extends HTMLElement {
     }
     if (alert.tap_action) {
       this._haptic();
-      this._runAction(alert.tap_action, alert);
+      const r = this._runAction(alert.tap_action, alert);
+      if (r instanceof Promise) r.catch(() => {});
     } else if (item.querySelector('.msg')) {
       item.classList.toggle('full');
       this._layout();
@@ -1629,12 +1704,19 @@ class NotificationStackCard extends HTMLElement {
   _onClearAll() {
     if (this._confirming !== 'clear') return this._setConfirming('clear');
     this._haptic();
-    this._alerts.filter((a) => a.dismissible).forEach((a) => this._dismiss(a, true));
+    // Home Assistant notifications are cleared together; any that fail come back (see _dismiss).
+    const pending = this._alerts.filter((a) => a.dismissible).map((a) => this._dismiss(a, true)).filter(Boolean);
     writeStore(this._keys.dismissed, this._dismissed);
     this._confirming = null;
     this._expanded = false;
     this._openGroups.clear();
     this._refresh();
+    if (pending.length > 1) {
+      Promise.allSettled(pending).then((res) => {
+        const failed = res.filter((r) => r.status === 'rejected').length;
+        if (failed > 1) this._fire('hass-notification', { message: `Couldn't clear ${failed} notifications` });
+      });
+    }
   }
 
   _onUnsnoozeAll() {
@@ -1646,68 +1728,144 @@ class NotificationStackCard extends HTMLElement {
     this._refresh();
   }
 
-  _onActionButton(alert, j) {
+  /**
+   * Action buttons. A service action (perform-action, call-service, toggle) marks its button busy until Home
+   * Assistant answers, and `dismiss: true` dismisses only once it succeeded; a failure keeps the alert and
+   * flags the button. Other actions dismiss straight after they run, as before.
+   */
+  async _onActionButton(alert, j) {
     const b = alert.actions[j];
     if (!b) return;
     const key = `${alert.id}:${j}`;
+    if (this._busy.has(key)) return;
     if (b.confirm && this._confirming !== key) return this._setConfirming(key);
     if (this._confirming) this._setConfirming(null);
     this._haptic();
     const act = b.tap_action || b;
-    this._runAction(act, alert);
-    if (b.dismiss && act.action !== 'dismiss') this._dismiss(alert);
-  }
-
-  _runAction(act, alert) {
-    const hass = this._hass;
-    if (!act || !hass) return;
-    const entity = act.entity || alert.entity;
-    switch (act.action) {
-      case 'perform-action':
-      case 'call-service': {
-        const svc = act.perform_action || act.service;
-        if (!svc || !svc.includes('.')) return;
-        const [domain, service] = svc.split('.', 2);
-        Promise.resolve(hass.callService(domain, service, act.data || act.service_data || {}, act.target)).catch(
-          (e) => this._fire('hass-notification', { message: `Action failed: ${e?.message || e}` })
-        );
-        break;
-      }
-      case 'navigate':
-        if (act.navigation_path) {
-          history.pushState(null, '', act.navigation_path);
-          window.dispatchEvent(new CustomEvent('location-changed', { detail: { replace: false } }));
-        }
-        break;
-      case 'more-info':
-        if (entity) this._fire('hass-more-info', { entityId: entity });
-        break;
-      case 'toggle':
-        if (entity) hass.callService('homeassistant', 'toggle', { entity_id: entity });
-        break;
-      case 'url':
-        if (act.url_path) window.open(act.url_path, act.new_tab === false ? '_self' : '_blank', 'noopener');
-        break;
-      case 'dismiss':
-        this._dismiss(alert);
-        break;
-      case 'snooze':
-        this._setSnoozeOpen(alert.id);
-        break;
-      default:
-        break;
+    const dismiss = !!b.dismiss && !['dismiss', 'snooze'].includes(act.action);
+    let result;
+    try {
+      result = this._runAction(act, alert);
+    } catch (e) {
+      console.warn('notification-stack-card: action failed', e);
+      result = false;
+    }
+    if (!(result instanceof Promise)) {
+      if (dismiss) this._dismiss(alert);
+      return;
+    }
+    // The alert as it was when tapped: if it turns into a new incident meanwhile, its new tokens aren't
+    // covered by this dismissal, so the new incident still shows.
+    const store = this._keys.dismissed;
+    const token = {};
+    const release = () => {
+      if (this._busy.get(key) !== token) return;
+      this._busy.delete(key);
+      this._refresh();
+    };
+    this._busy.set(key, token);
+    this._refresh();
+    // A request that never answers (e.g. a long script) frees the button after a while; it can still dismiss.
+    const cap = setTimeout(release, 30000);
+    try {
+      await result;
+      if (dismiss && this._keys.dismissed === store) this._dismiss(alert);
+    } catch (e) {
+      if (e?.nscOwn) this._fire('hass-notification', { message: e.message });
+      this._flashFailed(key);
+    } finally {
+      clearTimeout(cap);
+      release();
     }
   }
 
+  _flashFailed(key) {
+    this._failed = key;
+    this._haptic();
+    clearTimeout(this._failTimer);
+    this._failTimer = setTimeout(() => {
+      this._failed = null;
+      this._refresh();
+    }, 3000);
+    this._refresh();
+  }
+
+  /**
+   * Runs an action. Returns a promise for service calls (it rejects if Home Assistant reports an error,
+   * which Home Assistant itself shows as a toast), true when another action ran, false when nothing did.
+   */
+  _runAction(act, alert) {
+    const hass = this._hass;
+    if (!act || !hass) return false;
+    const entity = act.entity || alert.entity;
+    const own = (message) => Object.assign(new Error(message), { nscOwn: true });
+    switch (act.action) {
+      case 'perform-action':
+      case 'call-service': {
+        const svc = String(act.perform_action || act.service || '');
+        if (!/^[a-z0-9_]+\.[a-z0-9_]+$/i.test(svc)) return Promise.reject(own(`Action failed: "${svc}" isn't a valid action`));
+        const [domain, service] = svc.split('.', 2);
+        return Promise.resolve().then(() => hass.callService(domain, service, act.data || act.service_data || {}, act.target));
+      }
+      case 'navigate':
+        if (!act.navigation_path) return false;
+        try {
+          history.pushState(null, '', act.navigation_path);
+        } catch (e) {
+          console.warn('notification-stack-card: navigation failed', e);
+          return false;
+        }
+        window.dispatchEvent(new CustomEvent('location-changed', { detail: { replace: false } }));
+        return true;
+      case 'more-info':
+        if (!entity) return false;
+        this._fire('hass-more-info', { entityId: entity });
+        return true;
+      case 'toggle':
+        if (!entity) return Promise.reject(own('Action failed: no entity to toggle'));
+        return Promise.resolve().then(() => hass.callService('homeassistant', 'toggle', { entity_id: entity }));
+      case 'url': {
+        const url = safeUrl(act.url_path);
+        if (!url) {
+          if (act.url_path) console.warn('notification-stack-card: refused to open', act.url_path);
+          return false;
+        }
+        window.open(url, act.new_tab === false ? '_self' : '_blank', 'noopener');
+        return true;
+      }
+      case 'dismiss':
+        this._dismiss(alert);
+        return true;
+      case 'snooze':
+        this._setSnoozeOpen(alert.id);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Entity alerts are remembered on this device. A Home Assistant notification is hidden at once and
+   * dismissed in Home Assistant; if that fails it comes back. Returns that request, if any.
+   */
   _dismiss(alert, batch = false) {
+    let request;
     if (alert.kind === 'pn') {
-      this._hass.callService('persistent_notification', 'dismiss', { notification_id: alert.notification_id });
-      delete this._pn[alert.notification_id];
+      const id = alert.notification_id;
+      const n = this._pn[id];
+      delete this._pn[id];
+      request = Promise.resolve().then(() => this._hass.callService('persistent_notification', 'dismiss', { notification_id: id }));
+      request.catch(() => {
+        if (!n || this._pn[id]) return;
+        this._pn[id] = n;
+        this._refresh();
+      });
     } else {
       this._dismissed[alert.id] = alert.tokens;
       if (!batch) writeStore(this._keys.dismissed, this._dismissed);
     }
     if (!batch) this._refresh();
+    return request;
   }
 
   _snooze(item, alert, k) {
@@ -1934,7 +2092,7 @@ const HELPERS = {
   background_color: 'Leave empty to use your theme. Groups and alerts can set their own.',
   background_opacity: 'Below 100% the theme or glass shows through, e.g. 40% for a frosted tint.',
   text_color: 'Titles use it as is; messages and times a little softer. Empty: theme colors.',
-  message_overflow: 'Scrolling moves slowly through text past the line limit, then back. Tap a card to show it all.',
+  message_overflow: 'Scrolling moves slowly through text past the line limit: up and back, or right to left like a ticker. Tap a card to show it all.',
   scroll_direction: 'Right to left keeps each message on one line and scrolls it like a ticker. Message lines then doesn\'t apply.',
   zone_person: 'Used when the viewer has no person, e.g. a wall tablet. Groups can override it.',
   storage_key: 'Give a second copy of this card its own dismiss/snooze memory.',

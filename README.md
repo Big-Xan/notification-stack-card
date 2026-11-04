@@ -15,6 +15,7 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 - **Templates**: share one card's groups and alerts and reuse them on any dashboard, while each card keeps its own layout
 - **Combine**: one notification for several matching entities ("3 windows open")
 - **Action buttons**: perform-action, navigate, more-info, toggle, url, dismiss, with optional tap-twice confirm
+- **Buttons dismiss only after the action goes through**: with `dismiss: true`, a service action has to succeed first. If Home Assistant reports an error, the notification stays and you can try again
 - **Dismiss** with the X or a swipe; **snooze** with your own options and labels
 - Dismissed and snoozed alerts **come back when something new happens**
 - **Home Assistant persistent notifications**, dismissed in HA itself
@@ -96,7 +97,7 @@ Everything can also be set up in the visual editor.
 | `compact` | `false` | While collapsed, hide buttons so the stack stays short. They appear when the stack opens, or with a first tap on a single card |
 | `height` | none | Max height of the expanded list; it scrolls past this |
 | `max_peek` | `2` | Cards peeking behind the top card |
-| `peek_offset` | `10` | Pixels each peeking card shows |
+| `peek_offset` | `10` | Pixels each peeking card shows (`0` stacks them exactly) |
 | `message_lines` | `2` | Message lines shown before the rest is cut off (tap to show all) |
 | `message_overflow` | `truncate` | `truncate` (ends with …) or `scroll` (longer text moves instead of being cut off) |
 | `scroll_direction` | `vertical` | With `scroll`: `vertical` scrolls up through the lines and back; `horizontal` keeps each message on one line and scrolls it right to left like a ticker (`message_lines` then doesn't apply) |
@@ -122,7 +123,7 @@ Everything can also be set up in the visual editor.
 | `groups` | – | See below |
 | `alerts` | – | See below |
 | `empty_text` | `All clear` | Text for `when_empty: show` |
-| `storage_key` | `default` | Separate dismiss/snooze memory for another copy of the card |
+| `storage_key` | `default` | Dismiss/snooze memory to use. Cards with the same key (including the default) share it |
 | `styles` | – | Extra CSS inside the card |
 
 ### Snooze options
@@ -160,7 +161,7 @@ groups:
       action: more-info
     actions: []              # default buttons
     snooze_options: []       # override the card's snooze options
-    conditions: []           # only show when these pass
+    conditions: []           # only show when these pass (also applies to persistent notifications in this group)
     quiet_hours:
       start: "23:00"
       end: "07:00"
@@ -172,7 +173,7 @@ groups:
 
 **Zones** follow the person linked to whoever is logged in. A device without a person (a wall tablet user, for example) uses the group's `zone_person`, then the card's `zone_person`. With no person at all, the group shows rather than hiding silently.
 
-**Quiet hours** use the viewing device's clock and can cross midnight.
+**Quiet hours** use the viewing device's clock and can cross midnight. Times are 24-hour `HH:MM`; an invalid time turns quiet hours off.
 
 ### Alerts
 
@@ -183,7 +184,7 @@ groups:
 | `group` | Group ID to inherit from |
 | `state` / `state_not` | Value or list. With no match fields at all, the alert matches `on` |
 | `above` / `below` | Numeric match |
-| `attribute` | Match an attribute instead of the state |
+| `attribute` | Match an attribute instead of the state. A missing attribute never matches |
 | `conditions` | Extra checks that must all pass: `[{entity, state, state_not, above, below, attribute}]` |
 | `severity` | `critical`, `warning` or `info` (sort order and color) |
 | `color`, `icon` | Override the group or severity look |
@@ -193,7 +194,7 @@ groups:
 | `combined_title`, `combined_message` | Text used when 2 or more entities match |
 | `dismissible`, `snoozable` | Default `true`; snoozable follows dismissible |
 | `tap_action` | Action when the expanded card is tapped (default: show the full message) |
-| `actions` | Buttons: `{name, icon, tap_action, confirm, confirm_text, dismiss}` |
+| `actions` | Buttons: `{name, icon, tap_action, confirm, confirm_text, dismiss}`. See [Action buttons](#action-buttons) |
 
 **Placeholders:** `{name}` `{state}` (translated) `{value}` (raw) `{since}` `{attr:key}`, plus `{count}` and `{names}` on combined alerts.
 
@@ -209,16 +210,35 @@ show_groups: [security]
 collapsed_height: 120
 ```
 
-- Each card keeps its own layout, header, filter and dismiss/snooze memory.
-- A card can use several templates and still add its own groups and alerts. Its own win when IDs match.
+- Each card keeps its own layout, header and filter. Dismiss/snooze memory follows `storage_key`, so cards sharing a key share it.
+- A card can use several templates and still add its own groups and alerts. Its own win when IDs match; between templates, the later one in the list wins.
 - Saving the source dashboard updates every card that uses the template, with no reload needed.
 - The default dashboard is `lovelace`. A bare name (`main`) means the same dashboard.
 - Templates are one level deep: a shared card's own `templates` are not passed on.
 - The viewing user must be able to open the dashboard the template lives on.
 
+## Action buttons
+
+Each button runs its `tap_action`. With `confirm: true` the first tap asks and the second runs it.
+
+With `dismiss: true` the notification is dismissed after the action:
+
+- **Service actions** (`perform-action`, `toggle`): the card waits for Home Assistant to finish the request. The button shows it's busy meanwhile and can't be tapped twice. If Home Assistant reports an error, the notification stays, the button shows *Failed* for a moment and Home Assistant shows the error, so you can try again.
+- **Other actions** (`navigate`, `more-info`, `url`, or a button with no action): the notification is dismissed as soon as the action opens.
+
+A finished request means Home Assistant accepted and ran it. Whether the device actually got there (the lock locked, the vacuum docked) shows in the entity's state, which the alert keeps following: an alert for an unlocked door goes away by itself once the lock reports locked.
+
 ## How dismiss and snooze work
 
-Both are remembered per device in the browser. An alert stays hidden while nothing new happens. It comes back when an entity changes state again or, for a combined alert, when a new entity starts matching. Snoozes also end at their time. Dismissing a Home Assistant notification removes it in Home Assistant for everyone.
+Both are remembered per device in the browser, under the card's `storage_key`. An alert stays hidden while nothing new happens. It comes back when:
+
+- an entity changes state again,
+- for a combined alert, a new entity starts matching, or
+- its `conditions` (or its group's) turn off and on again. For example, a window alert that only shows while armed comes back the next time you arm, if the window is still open.
+
+Quiet hours, zones and `show_groups` only hide an alert, so a dismissed alert stays dismissed through them. Snoozes also end at their time.
+
+Dismissing a Home Assistant notification removes it in Home Assistant for everyone. If Home Assistant can't remove it, it shows again. **Clear** works the same way for each notification.
 
 ## Theming
 

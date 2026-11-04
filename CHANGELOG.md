@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0 — 2026-11-04
+
+A reliability release. No options were renamed and existing configs keep working.
+
+- **Buttons dismiss only after the action goes through.** With `dismiss: true`, a service action (`perform-action`, `toggle`) now has to succeed before the notification is dismissed. If Home Assistant reports an error, the notification stays and the button shows *Failed* for a moment. While the request runs, the button shows it's busy and can't be tapped twice (a double-tapped `toggle` used to switch back). Navigate, more-info, url and dismiss-only buttons dismiss right away, as before.
+- **Fix**: dismissing alerts that come from a template didn't last: they came back on the next page load.
+- **Fix**: quiet hours and zones no longer undo a dismissal. An alert dismissed before quiet hours stays dismissed after them. Conditions turning off and on still bring it back, now documented.
+- **Fix**: a Home Assistant notification that failed to dismiss stayed hidden until a reload; it now comes back. **Clear** reports how many couldn't be cleared.
+- **Fix**: group `conditions` now apply to persistent notifications shown in that group.
+- **Fix**: removing a template while it was still loading could bring its alerts back. When two templates use the same alert ID, the later one wins (the card's own alerts still win over both).
+- **Fix**: an attribute the entity doesn't have no longer matches `state_not`, and an empty value no longer counts as `0` for `above`/`below`.
+- **Fix**: `peek_offset: 0` was treated as 10.
+- **Fix**: quiet hours with an impossible time (such as `25:90`) are ignored instead of hiding alerts at odd hours.
+- **Fix**: Custom CSS is applied only as CSS.
+- **Fix**: `url` buttons won't open `javascript:` links.
+- Zones notice a person linked to your user without a reload. Turning off persistent notifications stops listening for them. Icon-only buttons are announced to screen readers. Home Assistant's own error message is no longer replaced by a vaguer one from the card.
+- **Editor**: the Longer messages helper now describes both scroll directions.
+
 ## 0.7.0 — 2026-11-01
 
 - **`scroll_direction`**: with `message_overflow: scroll`, choose `vertical` (up through the lines, as before) or `horizontal`, which keeps each message on one line and scrolls it right to left like a ticker. It loops seamlessly with a short pause each time the text comes back around. Set it in the editor under Text once Longer messages is set to Scroll. With reduced motion turned on, horizontal messages stay still.
