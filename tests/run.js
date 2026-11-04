@@ -324,6 +324,209 @@ test('O a person linked later is found for zones', async () => {
   return { before, after: ids(el) };
 }, (r) => eq(r, { before: ['w:binary_sensor.w'], after: [] }));
 
+test('P states match regardless of case', async () => {
+  const hass = makeHass({ 'lock.f': st('lock.f', 'unlocked'), 'sensor.r': st('sensor.r', 'Docked') });
+  const el = mount({ alerts: [
+    { id: 'a', entity: 'lock.f', state: ['Unlocked', ' Open '] },
+    { id: 'b', entity: 'sensor.r', state_not: 'docked' },
+    { id: 'c', entity: 'sensor.r', state: 'docked' },
+  ] }, hass);
+  return ids(el).sort();
+}, (r) => eq(r, ['a:lock.f', 'c:sensor.r']));
+
+test('Q editor: a comma typed into State survives the redraw', async () => {
+  const ed = document.createElement('notification-stack-card-editor');
+  ed.hass = makeHass({ 'lock.f': st('lock.f', 'unlocked') });
+  ed.setConfig({ type: 'custom:notification-stack-card', alerts: [{ id: 'a', entity: 'lock.f' }] });
+  document.body.appendChild(ed);
+  await tick(50);
+  let out;
+  ed.addEventListener('config-changed', (e) => { out = e.detail.config; ed.setConfig(out); });
+  ed._open.add('a:a'); ed._render(true); await tick(20);
+  const form = () => [...ed.shadowRoot.querySelectorAll('ha-form')].find((f) => f.schema?.some?.((x) => x.name === 'g_match'));
+  const steps = [];
+  for (const typed of ['unlocked,', 'unlocked, open']) {
+    form().emit({ ...form().data, state: typed });
+    await tick(5);
+    steps.push([form().data.state, out.alerts[0].state]);
+  }
+  return steps;
+}, (r) => eq(r, [['unlocked,', 'unlocked'], ['unlocked, open', ['unlocked', 'open']]]));
+
+test('S states match as shown ("Clear") or raw ("off")', async () => {
+  const hass = makeHass({ 'binary_sensor.cam': st('binary_sensor.cam', 'off', { device_class: 'occupancy' }) });
+  hass.formatEntityState = (so) => ({ off: 'Clear', on: 'Detected' }[so.state] || so.state);
+  const el = mount({ alerts: [
+    { id: 'shown', entity: 'binary_sensor.cam', state: 'Clear' },
+    { id: 'raw', entity: 'binary_sensor.cam', state: 'off' },
+    { id: 'not_shown', entity: 'binary_sensor.cam', state_not: 'clear' },
+    { id: 'not_unavail', entity: 'binary_sensor.cam', state_not: 'unavailable' },
+    { id: 'other', entity: 'binary_sensor.cam', state: 'Detected' },
+  ] }, hass);
+  return ids(el).sort();
+}, (r) => eq(r, ['not_unavail:binary_sensor.cam', 'raw:binary_sensor.cam', 'shown:binary_sensor.cam']));
+
+test('T {name} uses Home Assistant\'s entity name, falling back to friendly_name', async () => {
+  const s = { 'binary_sensor.a': st('binary_sensor.a', 'on', { friendly_name: 'Old name' }), 'binary_sensor.b': st('binary_sensor.b', 'on', { friendly_name: 'B friendly' }) };
+  const hass = makeHass(s);
+  hass.formatEntityName = (so) => (so.entity_id === 'binary_sensor.a' ? 'Kitchen Sink Leak Sensor Moisture' : '');
+  const el = mount({ alerts: [{ id: 'a', entity: 'binary_sensor.a' }, { id: 'b', entity: 'binary_sensor.b' }, { id: 'c', entities: [{ entity: 'binary_sensor.a', name: 'Kitchen sink' }] }] }, hass);
+  return el._alerts.map((x) => x.title).sort();
+}, (r) => eq(r, ['B friendly', 'Kitchen Sink Leak Sensor Moisture', 'Kitchen sink']));
+
+test('U card picker suggests only for locks and attention-worthy binary sensors', async () => {
+  const entry = window.customCards.find((c) => c.type === 'notification-stack-card');
+  const hass = makeHass({
+    'lock.front': st('lock.front', 'locked'),
+    'binary_sensor.leak': st('binary_sensor.leak', 'off', { device_class: 'moisture' }),
+    'binary_sensor.door': st('binary_sensor.door', 'off', { device_class: 'door' }),
+    'binary_sensor.motion': st('binary_sensor.motion', 'off', { device_class: 'motion' }),
+    'sensor.temp': st('sensor.temp', '20'),
+  });
+  const pick = (id) => entry.getEntitySuggestion(hass, id)?.config.alerts[0] || null;
+  return { doc: !!entry.documentationURL, lock: pick('lock.front'), leak: pick('binary_sensor.leak'), door: pick('binary_sensor.door')?.severity, motion: pick('binary_sensor.motion'), temp: pick('sensor.temp'), missing: pick('lock.nope') };
+}, (r) => eq(r, { doc: true, lock: { id: 'alert_front', entity: 'lock.front', severity: 'warning', state: ['unlocked', 'open', 'jammed'] }, leak: { id: 'alert_leak', entity: 'binary_sensor.leak', severity: 'critical' }, door: 'warning', motion: null, temp: null, missing: null }));
+
+test('U2 a suggested card config renders', async () => {
+  const entry = window.customCards.find((c) => c.type === 'notification-stack-card');
+  const hass = makeHass({ 'lock.front': st('lock.front', 'unlocked') });
+  const { config } = entry.getEntitySuggestion(hass, 'lock.front');
+  const el = mount(config, hass);
+  return ids(el);
+}, (r) => eq(r, ['alert_front:lock.front']));
+
+test('V snooze options: alert beats group beats card', async () => {
+  const s = { 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'on'), 'binary_sensor.c': st('binary_sensor.c', 'on') };
+  const el = mount({
+    snooze_options: [{ label: 'Card 5', minutes: 5 }],
+    groups: [{ id: 'g', snooze_options: [{ label: 'Group 1h', minutes: 60 }] }],
+    alerts: [
+      { id: 'a', entity: 'binary_sensor.a', group: 'g', snooze_options: [{ label: 'Alert 2h', minutes: 120 }] },
+      { id: 'b', entity: 'binary_sensor.b', group: 'g', snooze_options: [] },
+      { id: 'c', entity: 'binary_sensor.c' },
+    ],
+  }, makeHass(s));
+  const of = (id) => el._optionsFor(el._alerts.find((x) => x.id.startsWith(id + ':'))).map((o) => o.label);
+  return { a: of('a'), b: of('b'), c: of('c') };
+}, (r) => eq(r, { a: ['Alert 2h'], b: ['Group 1h'], c: ['Card 5'] }));
+
+test('W editor: snooze section explains, customizes and resets', async () => {
+  const ed = document.createElement('notification-stack-card-editor');
+  ed.hass = makeHass({ 'lock.f': st('lock.f', 'unlocked') });
+  let cfg = { type: 'custom:notification-stack-card', snooze_options: [{ label: '10 minutes', minutes: 10 }],
+    groups: [{ id: 'sec', name: 'Security', snooze_options: [{ label: '1 hour', minutes: 60 }] }],
+    alerts: [{ id: 'a', entity: 'lock.f', group: 'sec' }, { id: 'b', entity: 'lock.f', snoozable: false }] };
+  ed.setConfig(cfg);
+  document.body.appendChild(ed);
+  ed.addEventListener('config-changed', (e) => { cfg = e.detail.config; ed.setConfig(cfg); });
+  await tick(50);
+  const sections = () => [...ed.shadowRoot.querySelectorAll('details details')].filter((d) => /Snooze options/.test(d.querySelector('summary').textContent));
+  const alertSec = (n) => sections().find((d) => d.closest('details:not(details details)') && d.parentElement.closest('details').querySelector('summary').textContent.includes(n));
+  const notes = sections().map((d) => d.querySelector('.note').textContent);
+  const summaries = sections().map((d) => d.querySelector('summary .sub').textContent);
+  // customize alert a: copies the group's options
+  const btn = (d, text) => [...d.querySelectorAll('button.add')].find((x) => x.textContent.includes(text));
+  btn(sections()[1], 'Customize').click(); await tick(20);
+  const afterCustomize = clone(cfg.alerts[0].snooze_options);
+  const ownNote = sections()[1].querySelector('.note').textContent;
+  btn(sections()[1], 'Reset to default').click(); await tick(20);
+  // reset the group, then customize it: copies the card's
+  btn(sections()[0], 'Reset to default').click(); await tick(20);
+  const groupReset = 'snooze_options' in cfg.groups[0];
+  btn(sections()[0], 'Customize').click(); await tick(20);
+  return { count: sections().length, notes, summaries, afterCustomize, ownNote, afterReset: 'snooze_options' in cfg.alerts[0], groupReset, groupAfter: cfg.groups[0].snooze_options };
+  function clone(v) { return JSON.parse(JSON.stringify(v ?? null)); }
+}, (r) => r.count === 3
+  && /^Alerts in this group use these instead of this card's options \(10 minutes\)/.test(r.notes[0])
+  && /Uses the Security group's options: 1 hour\./.test(r.notes[1])
+  && /^This alert isn't snoozable/.test(r.notes[2])
+  && r.summaries[1] === "default (Security group's)"
+  && eq(r.afterCustomize, [{ label: '1 hour', minutes: 60 }])
+  && /instead of the Security group's options \(1 hour\)/.test(r.ownNote)
+  && r.afterReset === false
+  && r.groupReset === false
+  && eq(r.groupAfter, [{ label: '10 minutes', minutes: 10 }]));
+
+const snoozeCard = { snooze_options: [
+  { label: 'Until I\'m home', until_zone: 'zone.home' },
+  { label: 'Unless rain', until_conditions: [{ entity: 'binary_sensor.rain', state: 'on' }] },
+  { label: '1 min', minutes: 1 },
+], alerts: [{ id: 'w', entity: 'binary_sensor.w' }] };
+const snoozeStates = (where, rain) => ({
+  'binary_sensor.w': st('binary_sensor.w', 'on'),
+  'binary_sensor.rain': st('binary_sensor.rain', rain),
+  'person.me': st('person.me', where, { user_id: 'u1' }),
+});
+
+test('X1 snooze until I arrive home', async ([cfg, s1, s2, s3]) => {
+  const hass = makeHass(s1);
+  const el = mount(cfg, hass);
+  const labels = el._optionsFor(el._alerts[0]).map((o) => o.label);
+  el._snooze(el._items.get('w:binary_sensor.w'), el._alerts[0], 0);
+  await tick(300);
+  const away = ids(el);
+  el.hass = { ...hass, states: s2 }; // still away, elsewhere
+  const stillAway = ids(el);
+  el.hass = { ...hass, states: s3 }; // home
+  return { labels, away, stillAway, home: ids(el) };
+}, (r) => eq(r, { labels: ["Until I'm home", 'Unless rain', '1 min'], away: [], stillAway: [], home: ['w:binary_sensor.w'] }),
+  [snoozeCard, snoozeStates('work', 'off'), snoozeStates('not_home', 'off'), snoozeStates('home', 'off')]);
+
+test('X2 snoozed while already home: ends the next time I come home', async ([cfg, home, away]) => {
+  const hass = makeHass(home);
+  const el = mount(cfg, hass);
+  el._snooze(el._items.get('w:binary_sensor.w'), el._alerts[0], 0);
+  await tick(300);
+  const atHome = ids(el);
+  el.hass = { ...hass, states: away };
+  const left = ids(el);
+  el.hass = { ...hass, states: home };
+  return { atHome, left, back: ids(el) };
+}, (r) => eq(r, { atHome: [], left: [], back: ['w:binary_sensor.w'] }), [snoozeCard, snoozeStates('home', 'off'), snoozeStates('work', 'off')]);
+
+test('X3 snooze unless rain', async ([cfg, dry, wet]) => {
+  const hass = makeHass(dry);
+  const el = mount(cfg, hass);
+  el._snooze(el._items.get('w:binary_sensor.w'), el._alerts[0], 1);
+  await tick(300);
+  const stored = JSON.parse(localStorage.getItem('nsc-snoozed:default'))['w:binary_sensor.w'];
+  const whileDry = ids(el);
+  el.hass = { ...hass, states: wet };
+  return { armed: stored.armed, cond: stored.conditions.length, whileDry, rain: ids(el) };
+}, (r) => eq(r, { armed: true, cond: 1, whileDry: [], rain: ['w:binary_sensor.w'] }), [snoozeCard, snoozeStates('home', 'off'), snoozeStates('home', 'on')]);
+
+test('X4 with nobody to follow, the arrival option is not offered', async ([cfg]) => {
+  const el = mount(cfg, makeHass({ 'binary_sensor.w': st('binary_sensor.w', 'on'), 'binary_sensor.rain': st('binary_sensor.rain', 'off') }));
+  return el._optionsFor(el._alerts[0]).map((o) => o.label);
+}, (r) => eq(r, ['Unless rain', '1 min']), [snoozeCard]);
+
+test('X5 an arrival snooze with a time limit still ends at the limit', async ([s1]) => {
+  const el = mount({ snooze_options: [{ label: 'Home or 1 min', until_zone: 'zone.home', minutes: 1 }], alerts: [{ id: 'w', entity: 'binary_sensor.w' }] }, makeHass(s1));
+  el._snooze(el._items.get('w:binary_sensor.w'), el._alerts[0], 0);
+  await tick(300);
+  const hidden = ids(el);
+  const rec = el._snoozed['w:binary_sensor.w'];
+  const capOk = rec.until - Date.now() <= 60000 && rec.until - Date.now() > 50000;
+  rec.until = Date.now() - 1; el._refresh();
+  return { hidden, capOk, after: ids(el) };
+}, (r) => eq(r, { hidden: [], capOk: true, after: ['w:binary_sensor.w'] }), [snoozeStates('work', 'off')]);
+
+test('X6 editor: switching a row to "Until someone arrives" adds no duration', async () => {
+  const ed = document.createElement('notification-stack-card-editor');
+  ed.hass = makeHass({});
+  let cfg = { type: 'custom:notification-stack-card', snooze_options: [{ label: '5 minutes', minutes: 5 }] };
+  ed.setConfig(cfg);
+  document.body.appendChild(ed);
+  ed.addEventListener('config-changed', (e) => { cfg = e.detail.config; ed.setConfig(cfg); });
+  await tick(50);
+  const row = () => [...ed.shadowRoot.querySelectorAll('ha-form')].find((f) => f.data && 'type' in f.data && 'label' in f.data);
+  row().emit({ ...row().data, type: 'zone', label: 'Until home' });
+  await tick(20);
+  const zoneOpt = cfg.snooze_options[0];
+  const fields = row().schema.flatMap((x) => (x.schema ? x.schema.map((y) => y.name) : [x.name]));
+  return { zoneOpt, fields };
+}, (r) => eq(r.zoneOpt, { label: 'Until home', until_zone: 'zone.home' }) && ['until_zone', 'person', 'max_minutes'].every((f) => r.fields.includes(f)));
+
 // ---------- regressions ----------
 const three = () => { const s = {}; ['a', 'b', 'c'].forEach((x, i) => (s['binary_sensor.' + x] = st('binary_sensor.' + x, 'on', { friendly_name: x.toUpperCase() }, `2026-11-01T10:0${i}:00Z`))); return s; };
 
