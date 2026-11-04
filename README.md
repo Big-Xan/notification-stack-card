@@ -11,7 +11,8 @@ A lightweight, stacked, tap-to-expand notification card for Home Assistant. Aler
 
 One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
-<img width="1254" height="894" alt="image" src="https://github.com/user-attachments/assets/bd39f628-f070-42fd-95e1-e9c9bff24e93" />
+<img width="3072" height="2048" alt="notification-stack-card-header" src="https://github.com/user-attachments/assets/701483b6-ee74-4904-9fc2-a38779eb8efd" />
+
 
 ## Features
 
@@ -30,7 +31,8 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 - Header layout (alignment, padding, count and snoozed-chip positions), width, max heights, custom CSS
 - **In the card picker**: pick a lock or a leak, smoke, door or window sensor under *By entity* and a ready-made notification card is offered
 
-<img width="1800" height="1750" alt="gallery" src="https://github.com/user-attachments/assets/5c21c6f2-81cf-49f3-9316-bf838dade4fe" />
+<img width="3072" height="1440" alt="features-gallery" src="https://github.com/user-attachments/assets/e05bf724-56bd-4988-acee-e53a01e284f3" />
+
 
 ## Installation
 
