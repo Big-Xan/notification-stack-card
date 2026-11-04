@@ -1,11 +1,17 @@
+
 # Notification Stack Card
+
+**Navigation**
+
+- **Get started:** [Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Visual editor](#visual-editor)
+- **Configuration:** [Card options](#card-options) · [Snooze options](#snooze-options) · [Groups](#groups) · [Alerts](#alerts) · [Templates](#templates)
+- **More:** [Action buttons](#action-buttons) · [Dismiss & snooze behavior](#how-dismiss-and-snooze-work) · [Theming](#theming) · [Example configurations & Creative implementations](#example-configurations) · [Credits](#credits)
 
 A lightweight, stacked, tap-to-expand notification card for Home Assistant. Alerts come from your entities (and, optionally, Home Assistant's own notifications), stack like phone notifications, and expand into a full list with action buttons, dismiss and snooze.
 
 One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
 <img width="1254" height="894" alt="image" src="https://github.com/user-attachments/assets/bd39f628-f070-42fd-95e1-e9c9bff24e93" />
-
 
 ## Features
 
@@ -40,7 +46,7 @@ HACS adds the dashboard resource for you and updates its version on every update
 
 1. Download `notification-stack-card.js` from the [latest release](https://github.com/Big-Xan/notification-stack-card/releases/latest) and copy it to `/config/www/`.
 2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.7.0`
+   - URL: `/local/notification-stack-card.js?v=0.9.1`
    - Type: JavaScript module
 3. Reload the browser. Bump the `?v=` number after every update.
 
@@ -68,14 +74,53 @@ alerts:
             entity_id: lock.front_door
 ```
 
-Everything can also be set up in the visual editor.
+Everything can also be set up in the [visual editor](#visual-editor).
 
-<img width="920" height="2898" alt="editor-card-options" src="https://github.com/user-attachments/assets/df6d6b7e-d115-4362-9e58-e30ac2843ade" />
+## Visual editor
 
-<img width="500" height="1330" alt="editor-group" src="https://github.com/user-attachments/assets/2cd4eded-7adf-4995-9cf8-743ccdde2247" />
+Set up the card without writing YAML. The visual editor covers layout, appearance, notification behavior, groups, alerts, and snoozing. These are **actual editor screenshots**, arranged by the settings they show; select any screenshot to view it at full resolution.
 
-<img width="365" height="1552" alt="editor-alert" src="https://github.com/user-attachments/assets/f7486022-c6bb-4b55-996d-1dd89fbf20be" />
+<table>
+  <tr>
+    <th width="50%">1. Card configuration and layout</th>
+    <th width="50%">2. Text, colors, groups and templates</th>
+  </tr>
+  <tr>
+    <td align="center" valign="top">
+      <a href="https://github.com/user-attachments/assets/52f84360-9920-4a17-9488-871bc016b053"><img src="https://github.com/user-attachments/assets/52f84360-9920-4a17-9488-871bc016b053" alt="Visual editor: card title, empty state, header alignment, card sizing, peeking and sort order" width="355" /></a>
+      <p><sub>Title, empty state, header, dimensions, stacked preview, sorting and auto-collapse.</sub></p>
+    </td>
+    <td align="center" valign="top">
+      <a href="https://github.com/user-attachments/assets/13b4e5bd-d8ca-422c-8774-1ebf1848ba2d"><img src="https://github.com/user-attachments/assets/13b4e5bd-d8ca-422c-8774-1ebf1848ba2d" alt="Visual editor: text settings, card styling, group filtering, zones and reusable templates" width="355" /></a>
+      <p><sub>Typography, message overflow, theme colors, group filtering, zones and reusable templates.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <th>3. Snoozing, persistent notifications and advanced options</th>
+    <th>4. Individual alert editor</th>
+  </tr>
+  <tr>
+    <td align="center" valign="top">
+      <a href="https://github.com/user-attachments/assets/83a27d8f-1388-474f-b032-4bc2ff5e64c0"><img src="https://github.com/user-attachments/assets/83a27d8f-1388-474f-b032-4bc2ff5e64c0" alt="Visual editor: snooze presets, Home Assistant notifications and advanced settings" width="355" /></a>
+      <p><sub>Custom snooze presets, group and alert lists, Home Assistant notifications and storage settings.</sub></p>
+    </td>
+    <td align="center" valign="top">
+      <a href="https://github.com/user-attachments/assets/074822d4-d3d1-4762-b1f3-0764a7e080df"><img src="https://github.com/user-attachments/assets/074822d4-d3d1-4762-b1f3-0764a7e080df" alt="Visual editor: alert title, message, severity, visibility rules, actions and entities" width="355" /></a>
+      <p><sub>Per-alert text, severity, icon, conditions, dismiss/snooze behavior, entity matching and buttons.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <th colspan="2">5. Group editor</th>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <a href="https://github.com/user-attachments/assets/2e8be60d-a392-4f10-bb73-aeb906f13fc8"><img src="https://github.com/user-attachments/assets/2e8be60d-a392-4f10-bb73-aeb906f13fc8" alt="Visual editor: group appearance, severity, actions, quiet hours, zones and conditions" width="510" /></a>
+      <p><sub>Shared appearance, behavior, quiet hours, zones, conditional visibility and snooze options.</sub></p>
+    </td>
+  </tr>
+</table>
 
+For the YAML equivalents, see [Card options](#card-options), [Groups](#groups), and [Alerts](#alerts).
 
 ## Card options
 
