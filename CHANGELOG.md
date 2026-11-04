@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.2 — 2026-11-04
+
+A fix release. No options changed and existing configs keep working.
+
+**Fixes**
+
+- **Dismissals could disappear when another card used the same `storage_key`**, including the default key. Opening the card picker (its preview uses the default key) or a second card with different alerts cleared the first card's dismissals. A card now only ends dismissals for alerts it can show. Two cards with unnamed alerts no longer clear each other's.
+- **Cards on the same key now stay in step.** Dismissing or snoozing on one card updates the others straight away, also in other tabs, and two cards writing at once no longer lose each other's changes. **Unsnooze all** clears only that card's snoozes.
+- **A button action that can't run no longer dismisses.** A refused link, `navigate` without a path or an unknown action keeps the notification and shows *Failed*. A button with no action (or `action: none`) still just dismisses.
+- **Service buttons stay busy until Home Assistant answers.** The 30-second limit is gone, so a long script can't be started twice by a second tap.
+- **Conditions turning off and on while an alert is hidden now count.** If it happens during quiet hours, outside a zone or under `show_groups`, a dismissed alert comes back once it can show again, as the README already described.
+- Editing a card while a button's request was running could show the new button as busy or *Failed*.
+- Dismissals for alerts you've removed from the config are no longer cleaned up automatically; they take a few bytes and never hide anything else.
+
 ## 0.9.1 — 2026-11-04
 
 A reliability and editor release. No options were renamed and existing configs keep working.

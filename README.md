@@ -46,7 +46,7 @@ HACS adds the dashboard resource for you and updates its version on every update
 
 1. Download `notification-stack-card.js` from the [latest release](https://github.com/Big-Xan/notification-stack-card/releases/latest) and copy it to `/config/www/`.
 2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.9.1`
+   - URL: `/local/notification-stack-card.js?v=0.9.2`
    - Type: JavaScript module
 3. Reload the browser. Bump the `?v=` number after every update.
 
@@ -192,7 +192,7 @@ snooze_options:
         state: "on"
 ```
 
-`until_zone` follows `person` if the option sets one, else the group's or card's `zone_person`, else whoever is viewing. When nobody can be followed, the option isn't offered. `until_conditions` uses the same format as `conditions`. Both end the *next* time it happens: snooze "Until I'm home" while you're home and it waits until you leave and come back. Add `minutes` or `hours` to either as a time limit; without one they end after 30 days at most. Like every snooze, they also end when the entity changes again.
+`until_zone` follows `person` if the option sets one, else the group's or card's `zone_person`, else whoever is viewing. When nobody can be followed, the option isn't offered. `until_conditions` uses the same format as `conditions`. Both end the *next* time it happens: snooze "Until I'm home" while you're home and it waits until you leave and come back. The card notices this while it's on screen, so a trip that starts and ends while no dashboard with the card is open can be missed; the time limit or an entity change still ends the snooze. Add `minutes` or `hours` to either as a time limit; without one they end after 30 days at most. Like every snooze, they also end when the entity changes again.
 
 A group or an alert can have its own `snooze_options`. The most specific wins: an alert's own options, then its group's, then the card's. In the editor, open **Snooze options** inside a group or alert: it shows which options apply, **Customize** copies them in to edit, and **Reset to default** removes them again.
 
@@ -216,7 +216,7 @@ groups:
     tap_action:
       action: more-info
     actions: []              # default buttons
-    snooze_options: []       # override the card's snooze options
+    snooze_options: []       # its own snooze options; empty uses the card's (snoozable: false turns snoozing off)
     conditions: []           # only show when these pass (also applies to persistent notifications in this group)
     quiet_hours:
       start: "23:00"
@@ -280,8 +280,8 @@ Each button runs its `tap_action`. With `confirm: true` the first tap asks and t
 
 With `dismiss: true` the notification is dismissed after the action:
 
-- **Service actions** (`perform-action`, `toggle`): the card waits for Home Assistant to finish the request. The button shows it's busy meanwhile and can't be tapped twice. If Home Assistant reports an error, the notification stays, the button shows *Failed* for a moment and Home Assistant shows the error, so you can try again.
-- **Other actions** (`navigate`, `more-info`, `url`, or a button with no action): the notification is dismissed as soon as the action opens.
+- **Service actions** (`perform-action`, `toggle`): the card waits for Home Assistant to finish the request. The button shows it's busy meanwhile, however long that takes (a script keeps it busy while it runs), and can't be tapped twice. If Home Assistant reports an error, the notification stays, the button shows *Failed* for a moment and Home Assistant shows the error, so you can try again.
+- **Other actions** (`navigate`, `more-info`, `url`, or a button with no action): the notification is dismissed as soon as the action opens. If the action can't run (a refused link, `navigate` without a path), the notification stays and the button shows *Failed*.
 
 A finished request means Home Assistant accepted and ran it. Whether the device actually got there (the lock locked, the vacuum docked) shows in the entity's state, which the alert keeps following: an alert for an unlocked door goes away by itself once the lock reports locked.
 
@@ -293,7 +293,9 @@ Both are remembered per device in the browser, under the card's `storage_key`. A
 - for a combined alert, a new entity starts matching, or
 - its `conditions` (or its group's) turn off and on again. For example, a window alert that only shows while armed comes back the next time you arm, if the window is still open.
 
-Quiet hours, zones and `show_groups` only hide an alert, so a dismissed alert stays dismissed through them. Snoozes also end at their time.
+Quiet hours, zones and `show_groups` only hide an alert, so a dismissed alert stays dismissed through them, unless one of the changes above happens while it's hidden. Snoozes also end at their time.
+
+Cards with the same `storage_key` share this memory: dismissing or snoozing on one updates the others straight away, including in other tabs of the same browser. Each card only ends dismissals for its own alerts, so cards with different alerts can share a key.
 
 Dismissing a Home Assistant notification removes it in Home Assistant for everyone. If Home Assistant can't remove it, it shows again. **Clear** works the same way for each notification.
 

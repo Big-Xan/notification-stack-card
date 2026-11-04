@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.9.1
+ * notification-stack-card.js  v0.9.2
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -14,7 +14,7 @@
  * in Home Assistant.
  */
 
-const NSC_VERSION = '0.9.1';
+const NSC_VERSION = '0.9.2';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -253,6 +253,21 @@ function writeStore(key, obj) {
   } catch (_) {
     /* blocked storage: state lasts until reload */
   }
+}
+
+/**
+ * Cards can share a key, so a card writes only the records it changed onto what's stored now, never its whole
+ * copy. Returns the merged records. Other cards on the page are told afterwards (not mid-update).
+ */
+function mergeStore(key, mine, ids, src) {
+  const obj = readStore(key);
+  ids.forEach((id) => {
+    if (mine[id] === undefined) delete obj[id];
+    else obj[id] = mine[id];
+  });
+  writeStore(key, obj);
+  queueMicrotask(() => window.dispatchEvent(new CustomEvent('nsc-store', { detail: { key, src } })));
+  return obj;
 }
 
 // ---------- templates ----------
@@ -573,6 +588,14 @@ class NotificationStackCard extends HTMLElement {
       if (!ev.composedPath().includes(this)) this._minimize();
     };
     this._onNav = () => this._minimize();
+    // Another card on this page (nsc-store) or another tab (storage) changed dismiss/snooze memory.
+    this._onStore = (ev) => {
+      const key = ev.type === 'storage' ? ev.key : ev.detail?.key;
+      if (ev.detail?.src === this || !this._keys || (key !== this._keys.dismissed && key !== this._keys.snoozed)) return;
+      this._dismissed = readStore(this._keys.dismissed);
+      this._snoozed = readStore(this._keys.snoozed);
+      this._refresh();
+    };
     this._tplListener = (dash) => {
       if (this._tplData?.some((t) => t.dashboard === dash) || this._tplErrors?.length) this._loadTemplates();
     };
@@ -644,6 +667,10 @@ class NotificationStackCard extends HTMLElement {
 
     this._pnFailed = false;
     if (!cfg.persistent_notifications) this._unsubscribePN();
+    // Buttons are rebuilt, so a request from before can't mark the new ones busy or failed.
+    this._busy = new Map();
+    this._failed = null;
+    clearTimeout(this._failTimer);
 
     this._expanded = false;
     this._openGroups = new Set();
@@ -671,6 +698,8 @@ class NotificationStackCard extends HTMLElement {
     this._pnFailed = false;
     this._maybeSubscribe();
     TemplateStore.listeners.add(this._tplListener);
+    window.addEventListener('nsc-store', this._onStore);
+    window.addEventListener('storage', this._onStore);
     if (!this._timer) this._timer = setInterval(() => this._refresh(), 60000);
     if (this._stack) requestAnimationFrame(() => this._layout());
   }
@@ -682,6 +711,8 @@ class NotificationStackCard extends HTMLElement {
     [this._acTimer, this._confirmTimer, this._wakeTimer, this._failTimer].forEach(clearTimeout);
     this._failed = null;
     TemplateStore.listeners.delete(this._tplListener);
+    window.removeEventListener('nsc-store', this._onStore);
+    window.removeEventListener('storage', this._onStore);
     this._unsubscribePN();
   }
 
@@ -700,7 +731,6 @@ class NotificationStackCard extends HTMLElement {
       const p = parseTemplateRef(r);
       return p && !(own && p.name === own && p.dashboard === dashKey(currentDashboard()));
     });
-    this._tplSettled = !refs.length;
     if (!this._hass?.callWS) return;
     this._tplRequested = true;
     if (!refs.length) return;
@@ -712,8 +742,6 @@ class NotificationStackCard extends HTMLElement {
       this._tplData = res.filter((x) => !x.error);
       this._tplErrors = res.filter((x) => x.error);
       this._tplErrors.forEach((e) => console.warn(`notification-stack-card: ${e.error}`));
-      // Only a complete load can tell a deleted alert from one whose template didn't load this time.
-      this._tplSettled = !this._tplErrors.length;
       this._rebuildDefinition();
       this._refresh();
     });
@@ -935,23 +963,26 @@ class NotificationStackCard extends HTMLElement {
     const listed = (g) => !filter.length || (g ? filter.includes(g.id) : cfg.show_ungrouped !== false);
     const groupOk = (g) => !g?.conditions || this._conditionsPass(g.conditions);
     const out = [];
-    // Rules checked against their conditions and entities. Ones only hidden by the group filter, a zone or
-    // quiet hours aren't in here, so their dismissals are kept for when they show again.
-    const evaluated = new Set();
+    // Every alert ID this card's rules can produce. A dismissal ends only for one of these, so a card never
+    // ends another card's dismissals on a shared storage_key.
+    const checked = new Set();
 
     for (const rule of this._rules) {
       const g = rule.group ? this._groups.get(String(rule.group)) : undefined;
-      if (!listed(g) || !this._zoneAllows(g)) continue;
       const base = this._inherit(rule, g);
-      if (this._quietBlocks(g, base.severity, now)) continue;
-      evaluated.add(rule.__id);
+      // The group filter, zones and quiet hours only hide an alert: the rule is still checked, so conditions
+      // turning off and on while it's hidden still count as something new.
+      const hidden = !listed(g) || !this._zoneAllows(g) || this._quietBlocks(g, base.severity, now);
+      const ents = (rule.entities ? toList(rule.entities) : toList(rule.entity)).map((e) =>
+        typeof e === 'string' ? { entity: e } : e || {}
+      );
+      if (rule.combine) checked.add(`${rule.__id}:combined`);
+      else ents.forEach((ent) => ent.entity && checked.add(`${rule.__id}:${ent.entity}`));
       if (!groupOk(g)) continue;
       if (rule.conditions && !this._conditionsPass(rule.conditions)) continue;
 
       const hits = [];
-      const ents = rule.entities ? toList(rule.entities) : toList(rule.entity);
-      for (const e of ents) {
-        const ent = typeof e === 'string' ? { entity: e } : e || {};
+      for (const ent of ents) {
         const so = ent.entity && hass.states[ent.entity];
         if (!so) continue;
         if (!this._test(rule.attribute ? so.attributes[rule.attribute] : so.state, rule, this._shown(so, rule.attribute))) continue;
@@ -976,6 +1007,7 @@ class NotificationStackCard extends HTMLElement {
           message: this._fill(mTpl, ctx),
           ts: lead.so.last_changed,
           tokens: list.map((h) => `${h.ent.entity}@${h.so.last_changed}`),
+          hidden,
         };
       };
 
@@ -1022,19 +1054,15 @@ class NotificationStackCard extends HTMLElement {
     // Dismissed / snoozed: hidden while every current token was already seen.
     const nowMs = now.getTime();
     const covered = (seen, a) => Array.isArray(seen) && a.tokens.every((t) => seen.includes(t));
-    const ruleIds = new Set(this._rules.map((r) => r.__id));
-    const ruleOf = (id) => id.slice(0, id.lastIndexOf(':'));
-    // A dismissal ends when its alert shows with something new, or its rule was checked and nothing matched.
-    // One for a rule that's gone is dropped once templates have loaded.
-    const ended = (id, a) =>
-      a ? !covered(this._dismissed[id], a) : evaluated.has(ruleOf(id)) || (this._tplSettled && !ruleIds.has(ruleOf(id)));
-    let dChanged = false;
-    let sChanged = false;
+    // A dismissal ends when its alert comes with something new, or this card's rule for it was checked and
+    // nothing matched. Records this card can't produce belong to another card (or a removed alert) and are left.
+    const ended = (id, a) => (a ? !covered(this._dismissed[id], a) : checked.has(id));
+    const dIds = [];
+    const sIds = [];
     for (const id of Object.keys(this._dismissed)) {
-      const a = active.get(id);
-      if (ended(id, a)) {
+      if (ended(id, active.get(id))) {
         delete this._dismissed[id];
-        dChanged = true;
+        dIds.push(id);
       }
     }
     for (const id of Object.keys(this._snoozed)) {
@@ -1044,18 +1072,19 @@ class NotificationStackCard extends HTMLElement {
       const met = s ? this._snoozeEventMet(s) : null;
       if (met === false && !s.armed) {
         s.armed = true;
-        sChanged = true;
+        sIds.push(id);
       }
       if (!s || !(s.until > nowMs) || (a && !covered(s.tokens, a)) || (met && s.armed)) {
         delete this._snoozed[id];
-        sChanged = true;
+        sIds.push(id);
       }
     }
-    if (dChanged) writeStore(this._keys.dismissed, this._dismissed);
-    if (sChanged) writeStore(this._keys.snoozed, this._snoozed);
+    if (dIds.length) this._dismissed = mergeStore(this._keys.dismissed, this._dismissed, dIds, this);
+    if (sIds.length) this._snoozed = mergeStore(this._keys.snoozed, this._snoozed, sIds, this);
 
     let snoozed = 0;
     const visible = out.filter((a) => {
+      if (a.hidden) return false;
       if (this._dismissed[a.id]) return false;
       if (this._snoozed[a.id]) {
         snoozed += 1;
@@ -1363,6 +1392,12 @@ class NotificationStackCard extends HTMLElement {
     const g = a.group ? this._groups.get(a.group) : undefined;
     const id = opt.person || g?.zone_person || this._config.zone_person || this._viewerPerson();
     return id && this._hass.states[id] ? id : '';
+  }
+
+  /** Whether an alert ID comes from one of this card's rules or its Home Assistant notifications. */
+  _ownsAlertId(id) {
+    const rule = id.slice(0, id.lastIndexOf(':'));
+    return (rule === 'pn' && !!this._config.persistent_notifications) || this._rules.some((r) => r.__id === rule);
   }
 
   /** True when an arrival/conditions snooze's event is happening now; null for a snooze that only uses time. */
@@ -1783,8 +1818,10 @@ class NotificationStackCard extends HTMLElement {
     if (this._confirming !== 'clear') return this._setConfirming('clear');
     this._haptic();
     // Home Assistant notifications are cleared together; any that fail come back (see _dismiss).
-    const pending = this._alerts.filter((a) => a.dismissible).map((a) => this._dismiss(a, true)).filter(Boolean);
-    writeStore(this._keys.dismissed, this._dismissed);
+    const cleared = this._alerts.filter((a) => a.dismissible);
+    const pending = cleared.map((a) => this._dismiss(a, true)).filter(Boolean);
+    const local = cleared.filter((a) => a.kind !== 'pn').map((a) => a.id);
+    if (local.length) this._dismissed = mergeStore(this._keys.dismissed, this._dismissed, local, this);
     this._confirming = null;
     this._expanded = false;
     this._openGroups.clear();
@@ -1800,8 +1837,10 @@ class NotificationStackCard extends HTMLElement {
   _onUnsnoozeAll() {
     if (this._confirming !== 'unsnooze') return this._setConfirming('unsnooze');
     this._haptic();
-    this._snoozed = {};
-    writeStore(this._keys.snoozed, this._snoozed);
+    // This card's snoozes only; another card on the same key keeps its own.
+    const mine = Object.keys(this._snoozed).filter((id) => this._ownsAlertId(id));
+    mine.forEach((id) => delete this._snoozed[id]);
+    this._snoozed = mergeStore(this._keys.snoozed, this._snoozed, mine, this);
     this._confirming = null;
     this._refresh();
   }
@@ -1809,7 +1848,8 @@ class NotificationStackCard extends HTMLElement {
   /**
    * Action buttons. A service action (perform-action, call-service, toggle) marks its button busy until Home
    * Assistant answers, and `dismiss: true` dismisses only once it succeeded; a failure keeps the alert and
-   * flags the button. Other actions dismiss straight after they run, as before.
+   * flags the button. Other actions dismiss straight after they run; one that couldn't run (a refused link,
+   * no path) flags the button instead. A button with no action just dismisses.
    */
   async _onActionButton(alert, j) {
     const b = alert.actions[j];
@@ -1829,6 +1869,7 @@ class NotificationStackCard extends HTMLElement {
       result = false;
     }
     if (!(result instanceof Promise)) {
+      if (result === false && act.action && act.action !== 'none') return this._flashFailed(key);
       if (dismiss) this._dismiss(alert);
       return;
     }
@@ -1843,16 +1884,15 @@ class NotificationStackCard extends HTMLElement {
     };
     this._busy.set(key, token);
     this._refresh();
-    // A request that never answers (e.g. a long script) frees the button after a while; it can still dismiss.
-    const cap = setTimeout(release, 30000);
+    // The button stays busy until Home Assistant answers (a long script keeps it busy while it runs). A lost
+    // connection rejects the request, so it can't stay busy for good.
     try {
       await result;
       if (dismiss && this._keys.dismissed === store) this._dismiss(alert);
     } catch (e) {
       if (e?.nscOwn) this._fire('hass-notification', { message: e.message });
-      this._flashFailed(key);
+      if (this._busy.get(key) === token) this._flashFailed(key);
     } finally {
-      clearTimeout(cap);
       release();
     }
   }
@@ -1940,7 +1980,7 @@ class NotificationStackCard extends HTMLElement {
       });
     } else {
       this._dismissed[alert.id] = alert.tokens;
-      if (!batch) writeStore(this._keys.dismissed, this._dismissed);
+      if (!batch) this._dismissed = mergeStore(this._keys.dismissed, this._dismissed, [alert.id], this);
     }
     if (!batch) this._refresh();
     return request;
@@ -1957,7 +1997,7 @@ class NotificationStackCard extends HTMLElement {
     // that to stop first.
     if (rec.zone || rec.conditions) rec.armed = !this._snoozeEventMet(rec);
     this._snoozed[alert.id] = rec;
-    writeStore(this._keys.snoozed, this._snoozed);
+    this._snoozed = mergeStore(this._keys.snoozed, this._snoozed, [alert.id], this);
     this._snoozeOpen = null;
     this._animateOut(item, 1, () => this._refresh());
   }
