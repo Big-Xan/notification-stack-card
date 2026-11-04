@@ -22,6 +22,7 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 - **Matches your theme**: notifications are drawn as regular Home Assistant cards, so card themes like Frosted Glass apply
 - Long messages can **scroll** instead of being cut off; one tap opens the stack and shows the full text
 - Header layout (alignment, padding, count and snoozed-chip positions), width, max heights, custom CSS
+- **In the card picker**: pick a lock or a leak, smoke, door or window sensor under *By entity* and a ready-made notification card is offered
 
 <img width="1800" height="1750" alt="gallery" src="https://github.com/user-attachments/assets/5c21c6f2-81cf-49f3-9316-bf838dade4fe" />
 
@@ -138,7 +139,17 @@ snooze_options:
     until: "08:00"      # next time it is 08:00
   - label: Until tomorrow
     until: tomorrow     # midnight
+  - label: Until I'm home
+    until_zone: zone.home         # the next time the person arrives there
+  - label: Unless it rains
+    until_conditions:             # the next time all of these match
+      - entity: binary_sensor.rain_expected
+        state: "on"
 ```
+
+`until_zone` follows `person` if the option sets one, else the group's or card's `zone_person`, else whoever is viewing. When nobody can be followed, the option isn't offered. `until_conditions` uses the same format as `conditions`. Both end the *next* time it happens: snooze "Until I'm home" while you're home and it waits until you leave and come back. Add `minutes` or `hours` to either as a time limit; without one they end after 30 days at most. Like every snooze, they also end when the entity changes again.
+
+A group or an alert can have its own `snooze_options`. The most specific wins: an alert's own options, then its group's, then the card's. In the editor, open **Snooze options** inside a group or alert: it shows which options apply, **Customize** copies them in to edit, and **Reset to default** removes them again.
 
 ### Groups
 
@@ -182,7 +193,7 @@ groups:
 | `id` | Stable ID; keeps dismiss/snooze memory when alerts are reordered |
 | `entity` / `entities` | One entity, or a list of entity IDs or `{entity, name, icon}` |
 | `group` | Group ID to inherit from |
-| `state` / `state_not` | Value or list. With no match fields at all, the alert matches `on` |
+| `state` / `state_not` | Value or list (comma separated in the editor). Either the state as Home Assistant shows it (`Clear`, `Unlocked`) or its raw value (`off`, `unlocked`); not case-sensitive. With no match fields at all, the alert matches `on` |
 | `above` / `below` | Numeric match |
 | `attribute` | Match an attribute instead of the state. A missing attribute never matches |
 | `conditions` | Extra checks that must all pass: `[{entity, state, state_not, above, below, attribute}]` |
@@ -195,8 +206,9 @@ groups:
 | `dismissible`, `snoozable` | Default `true`; snoozable follows dismissible |
 | `tap_action` | Action when the expanded card is tapped (default: show the full message) |
 | `actions` | Buttons: `{name, icon, tap_action, confirm, confirm_text, dismiss}`. See [Action buttons](#action-buttons) |
+| `snooze_options` | This alert's own snooze options, used instead of its group's or the card's |
 
-**Placeholders:** `{name}` `{state}` (translated) `{value}` (raw) `{since}` `{attr:key}`, plus `{count}` and `{names}` on combined alerts.
+**Placeholders:** `{name}` (the entity's name as Home Assistant shows it) `{state}` (translated) `{value}` (raw) `{since}` `{attr:key}`, plus `{count}` and `{names}` on combined alerts.
 
 ## Templates
 
@@ -472,6 +484,91 @@ Then point an alert at it, with a button to the view that holds your Adaptive Pl
         tap_action:
           action: navigate
           navigation_path: /dashboard-home/plants
+```
+
+### Smarter snoozes
+
+Snoozes can end on what happens next instead of after a set time.
+
+**Windows open: hide it unless rain is coming.** Make a sensor for "rain expected in the next few hours" once (it needs a weather integration with hourly forecasts; set `hours` and `chance` to taste), then snooze the window alert until it turns on:
+
+```yaml
+# configuration.yaml
+template:
+  - triggers:
+      - trigger: time_pattern
+        minutes: /30
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: weather.get_forecasts
+        target:
+          entity_id: weather.home
+        data:
+          type: hourly
+        response_variable: forecast
+    binary_sensor:
+      - name: Rain expected
+        unique_id: rain_expected
+        state: >
+          {% set hours = 6 %}
+          {% set chance = 50 %}
+          {{ forecast['weather.home'].forecast[:hours]
+             | selectattr('precipitation_probability', 'defined')
+             | selectattr('precipitation_probability', 'ge', chance)
+             | list | count > 0 }}
+```
+
+```yaml
+  - id: windows_open
+    group: home
+    entities: [binary_sensor.living_room_window, binary_sensor.bedroom_window]
+    combine: true
+    combined_title: "{count} windows open"
+    combined_message: "{names}"
+    snooze_options:
+      - label: Unless it rains
+        until_conditions:
+          - entity: binary_sensor.rain_expected
+            state: "on"
+      - label: 2 hours
+        hours: 2
+```
+
+**A package at the door: remind me when I'm home.** On your phone at work, snooze it until you get back:
+
+```yaml
+  - id: package
+    group: home
+    entity: binary_sensor.porch_package
+    title: Package at the door
+    snooze_options:
+      - label: Until I'm home
+        until_zone: zone.home
+      - label: 1 hour
+        hours: 1
+```
+
+**Someone else's reminder.** On a shared wall tablet, follow one person instead of the viewer, with a time limit as a backstop:
+
+```yaml
+    snooze_options:
+      - label: Until they're home
+        until_zone: zone.home
+        person: person.your_name
+        hours: 12
+```
+
+**This evening, at home.** Conditions combine: here the snooze ends once you're home *and* it's evening, using a Times of the Day helper:
+
+```yaml
+    snooze_options:
+      - label: This evening at home
+        until_conditions:
+          - entity: person.your_name
+            state: home
+          - entity: binary_sensor.evening   # Times of the Day helper, 17:00–23:00
+            state: "on"
 ```
 
 ### A short card for a busy dashboard

@@ -1,22 +1,32 @@
 # Changelog
 
-## 0.8.0 — 2026-11-04
+## 0.9.1 — 2026-11-04
 
-A reliability release. No options were renamed and existing configs keep working.
+A reliability and editor release. No options were renamed and existing configs keep working.
 
-- **Buttons dismiss only after the action goes through.** With `dismiss: true`, a service action (`perform-action`, `toggle`) now has to succeed before the notification is dismissed. If Home Assistant reports an error, the notification stays and the button shows *Failed* for a moment. While the request runs, the button shows it's busy and can't be tapped twice (a double-tapped `toggle` used to switch back). Navigate, more-info, url and dismiss-only buttons dismiss right away, as before.
-- **Fix**: dismissing alerts that come from a template didn't last: they came back on the next page load.
-- **Fix**: quiet hours and zones no longer undo a dismissal. An alert dismissed before quiet hours stays dismissed after them. Conditions turning off and on still bring it back, now documented.
-- **Fix**: a Home Assistant notification that failed to dismiss stayed hidden until a reload; it now comes back. **Clear** reports how many couldn't be cleared.
-- **Fix**: group `conditions` now apply to persistent notifications shown in that group.
-- **Fix**: removing a template while it was still loading could bring its alerts back. When two templates use the same alert ID, the later one wins (the card's own alerts still win over both).
-- **Fix**: an attribute the entity doesn't have no longer matches `state_not`, and an empty value no longer counts as `0` for `above`/`below`.
-- **Fix**: `peek_offset: 0` was treated as 10.
-- **Fix**: quiet hours with an impossible time (such as `25:90`) are ignored instead of hiding alerts at odd hours.
-- **Fix**: Custom CSS is applied only as CSS.
-- **Fix**: `url` buttons won't open `javascript:` links.
+**New**
+
+- **Buttons dismiss only after the action goes through.** With `dismiss: true`, a service action (`perform-action`, `toggle`) has to succeed before the notification is dismissed. If Home Assistant reports an error, the notification stays and the button shows *Failed* for a moment. While the request runs, the button shows it's busy and can't be tapped twice (a double-tapped `toggle` used to switch back). Navigate, more-info, url and dismiss-only buttons still dismiss right away.
+- **Snoozes that end on what happens next.** A snooze option can end when someone arrives in a zone (`until_zone`, "Until I'm home") or when conditions match (`until_conditions`, "Unless it rains"), with an optional time limit. See *Smarter snoozes* in the README for examples.
+- **Snooze options per group and per alert, in the editor.** Each group and alert has a collapsed **Snooze options** section that lists the options in use. **Customize** copies them in so you can edit them, and **Reset to default** goes back. An alert's own options win over its group's, which win over the card's.
+- **Card picker**: when you add a card by picking an entity, locks and leak, smoke, gas, carbon monoxide, safety, door, window, garage door, opening and problem sensors offer a ready-made Notification Stack Card. Other entities get no suggestion. The picker also links to the documentation.
+- **States match as shown or raw, regardless of case**: `Clear`, `clear` and `off` all match a sensor Home Assistant shows as "Clear".
+- **`{name}`** uses Home Assistant's own entity name, falling back to `friendly_name`, so it keeps working as `friendly_name` is phased out from 2026.11.
+
+**Fixes**
+
+- Dismissing alerts that come from a template didn't last: they came back on the next page load.
+- Quiet hours and zones no longer undo a dismissal. Conditions turning off and on still bring an alert back, now documented.
+- A Home Assistant notification that failed to dismiss stayed hidden until a reload; it now comes back. **Clear** reports how many couldn't be cleared.
+- Group `conditions` now apply to persistent notifications shown in that group.
+- Removing a template while it was still loading could bring its alerts back. When two templates use the same alert ID, the later one wins (the card's own alerts still win over both).
+- In the visual editor, a comma typed into **State** or **State not** disappeared straight away.
+- An attribute the entity doesn't have no longer matches `state_not`, and an empty value no longer counts as `0` for `above`/`below`.
+- An alert with an empty snooze list now falls back to its group's options instead of the card's.
+- `peek_offset: 0` was treated as 10, and quiet hours with an impossible time (such as `25:90`) are ignored.
+- Custom CSS is applied only as CSS, and `url` buttons won't open `javascript:` links.
 - Zones notice a person linked to your user without a reload. Turning off persistent notifications stops listening for them. Icon-only buttons are announced to screen readers. Home Assistant's own error message is no longer replaced by a vaguer one from the card.
-- **Editor**: the Longer messages helper now describes both scroll directions.
+- The Longer messages helper describes both scroll directions.
 
 ## 0.7.0 — 2026-11-01
 

@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.8.0
+ * notification-stack-card.js  v0.9.1
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -14,7 +14,7 @@
  * in Home Assistant.
  */
 
-const NSC_VERSION = '0.8.0';
+const NSC_VERSION = '0.9.1';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -188,9 +188,22 @@ function personInZone(person, zoneId, states) {
   return names.some((n) => String(n).toLowerCase() === where);
 }
 
-/** Snooze option -> epoch ms it ends, or null if the option is invalid. */
+/** A snooze that only ends on an arrival or on conditions runs this long at most. */
+const OPEN_SNOOZE_MS = 30 * 86400000;
+const hasEvent = (opt) => !!(opt && (opt.until_zone || !isBlank(opt.until_conditions)));
+
+/**
+ * Snooze option -> epoch ms it ends, or null if the option is invalid. An option that ends on an arrival
+ * (`until_zone`) or on conditions (`until_conditions`) may add a time limit; without one it runs up to 30 days.
+ */
 function snoozeEnd(opt, now = new Date()) {
   if (!opt) return null;
+  const timed = snoozeTime(opt, now);
+  if (timed !== null) return timed;
+  return hasEvent(opt) ? now.getTime() + OPEN_SNOOZE_MS : null;
+}
+
+function snoozeTime(opt, now) {
   const mins = Number(opt.minutes) || (Number(opt.hours) || 0) * 60;
   if (mins > 0) return now.getTime() + mins * 60000;
   if (opt.until === 'tomorrow') {
@@ -211,7 +224,12 @@ function snoozeEnd(opt, now = new Date()) {
 const normalizeSnooze = (list) =>
   toList(list)
     .filter((o) => o && snoozeEnd(o) !== null)
-    .map((o) => ({ ...o, label: o.label || (o.minutes ? `${o.minutes} min` : o.until) }));
+    .map((o) => ({
+      ...o,
+      label:
+        o.label ||
+        (o.until_zone ? 'Until I arrive' : !isBlank(o.until_conditions) ? 'Until conditions match' : o.minutes ? `${o.minutes} min` : o.until),
+    }));
 
 const normalizeGroups = (groups) => {
   const map = new Map();
@@ -761,19 +779,35 @@ class NotificationStackCard extends HTMLElement {
 
   // ---------- rules ----------
 
-  _test(val, c) {
+  /**
+   * `shown` (optional) gives the value as Home Assistant displays it ("Clear" for a sensor that is "off"),
+   * so a rule may use either the raw value or the displayed one.
+   */
+  _test(val, c, shown) {
     if (val === undefined || val === null) return false; // missing attribute
     const hasState = c.state !== undefined;
     const hasNot = c.state_not !== undefined;
     const hasNum = c.above !== undefined || c.below !== undefined;
     const s = String(val);
+    // States match regardless of case and surrounding spaces ("Unlocked" = "unlocked").
+    const key = s.trim().toLowerCase();
+    let shownKey;
+    const shownOf = () => {
+      if (shownKey === undefined) shownKey = String((typeof shown === 'function' ? shown() : shown) ?? '').trim().toLowerCase();
+      return shownKey;
+    };
+    const listed = (list) =>
+      toList(list).some((x) => {
+        const k = String(x).trim().toLowerCase();
+        return k === key || (shown !== undefined && k !== '' && k === shownOf());
+      });
     if (hasState) {
-      if (!toList(c.state).map(String).includes(s)) return false;
+      if (!listed(c.state)) return false;
     } else {
-      if (UNAVAILABLE.includes(s)) return false;
-      if (!hasNot && !hasNum && s !== 'on') return false;
+      if (UNAVAILABLE.includes(key)) return false;
+      if (!hasNot && !hasNum && key !== 'on') return false;
     }
-    if (hasNot && toList(c.state_not).map(String).includes(s)) return false;
+    if (hasNot && listed(c.state_not)) return false;
     if (hasNum) {
       if (s.trim() === '') return false;
       const n = Number(val);
@@ -784,11 +818,34 @@ class NotificationStackCard extends HTMLElement {
     return true;
   }
 
+  /** The state or attribute as Home Assistant displays it, computed only when a rule needs it. */
+  _shown(so, attribute) {
+    return () => {
+      try {
+        if (attribute) return this._hass.formatEntityAttributeValue?.(so, attribute) ?? so.attributes[attribute];
+        return this._hass.formatEntityState ? this._hass.formatEntityState(so) : so.state;
+      } catch (_) {
+        return attribute ? so.attributes[attribute] : so.state;
+      }
+    };
+  }
+
+  /** The entity's name as Home Assistant shows it; friendly_name on frontends without formatEntityName. */
+  _entityName(so) {
+    try {
+      const n = this._hass.formatEntityName?.(so);
+      if (n) return n;
+    } catch (_) {
+      /* older frontend */
+    }
+    return so.attributes.friendly_name;
+  }
+
   _conditionsPass(conds) {
     return toList(conds).every((c) => {
       const so = c && this._hass.states[c.entity];
       if (!so) return false;
-      return this._test(c.attribute ? so.attributes[c.attribute] : so.state, c);
+      return this._test(c.attribute ? so.attributes[c.attribute] : so.state, c, this._shown(so, c.attribute));
     });
   }
 
@@ -864,7 +921,7 @@ class NotificationStackCard extends HTMLElement {
       fg: cssColor(rule.text_color ?? g?.text_color),
       tap_action: rule.tap_action ?? g?.tap_action,
       actions: toList(rule.actions ?? g?.actions),
-      snooze_options: rule.snooze_options ?? g?.snooze_options,
+      snooze_options: normalizeSnooze(rule.snooze_options).length ? rule.snooze_options : g?.snooze_options,
       group: g ? g.id : '',
       groupName: g && g.show_name !== false ? g.name || '' : '',
     };
@@ -897,8 +954,8 @@ class NotificationStackCard extends HTMLElement {
         const ent = typeof e === 'string' ? { entity: e } : e || {};
         const so = ent.entity && hass.states[ent.entity];
         if (!so) continue;
-        if (!this._test(rule.attribute ? so.attributes[rule.attribute] : so.state, rule)) continue;
-        hits.push({ ent, so, name: ent.name || so.attributes.friendly_name || ent.entity });
+        if (!this._test(rule.attribute ? so.attributes[rule.attribute] : so.state, rule, this._shown(so, rule.attribute))) continue;
+        hits.push({ ent, so, name: ent.name || this._entityName(so) || ent.entity });
       }
       if (!hits.length) continue;
 
@@ -983,7 +1040,13 @@ class NotificationStackCard extends HTMLElement {
     for (const id of Object.keys(this._snoozed)) {
       const s = this._snoozed[id];
       const a = active.get(id);
-      if (!s || !(s.until > nowMs) || (a && !covered(s.tokens, a))) {
+      // Arrival/conditions snoozes arm once the event isn't happening, then end when it happens.
+      const met = s ? this._snoozeEventMet(s) : null;
+      if (met === false && !s.armed) {
+        s.armed = true;
+        sChanged = true;
+      }
+      if (!s || !(s.until > nowMs) || (a && !covered(s.tokens, a)) || (met && s.armed)) {
         delete this._snoozed[id];
         sChanged = true;
       }
@@ -1291,7 +1354,22 @@ class NotificationStackCard extends HTMLElement {
 
   _optionsFor(a) {
     const own = normalizeSnooze(a.snooze_options);
-    return own.length ? own : this._snoozeOptions;
+    // "Until I arrive" needs a person to follow; without one the option isn't offered.
+    return (own.length ? own : this._snoozeOptions).filter((o) => !o.until_zone || this._snoozePerson(o, a));
+  }
+
+  /** Whose arrival ends an "until zone" snooze: the option's person, else the group's or card's zone person, else the viewer. */
+  _snoozePerson(opt, a) {
+    const g = a.group ? this._groups.get(a.group) : undefined;
+    const id = opt.person || g?.zone_person || this._config.zone_person || this._viewerPerson();
+    return id && this._hass.states[id] ? id : '';
+  }
+
+  /** True when an arrival/conditions snooze's event is happening now; null for a snooze that only uses time. */
+  _snoozeEventMet(s) {
+    if (s.zone) return personInZone(this._hass.states[s.person], s.zone, this._hass.states);
+    if (s.conditions) return this._conditionsPass(s.conditions);
+    return null;
   }
 
   _itemHTML(a) {
@@ -1869,9 +1947,16 @@ class NotificationStackCard extends HTMLElement {
   }
 
   _snooze(item, alert, k) {
-    const until = snoozeEnd(this._optionsFor(alert)[k]);
+    const opt = this._optionsFor(alert)[k];
+    const until = snoozeEnd(opt);
     if (!until) return;
-    this._snoozed[alert.id] = { until, tokens: alert.tokens };
+    const rec = { until, tokens: alert.tokens };
+    if (opt.until_zone) Object.assign(rec, { zone: opt.until_zone, person: this._snoozePerson(opt, alert) });
+    else if (!isBlank(opt.until_conditions)) rec.conditions = toList(opt.until_conditions);
+    // It ends the next time the event happens: if it's happening already (at home, conditions met), it waits for
+    // that to stop first.
+    if (rec.zone || rec.conditions) rec.armed = !this._snoozeEventMet(rec);
+    this._snoozed[alert.id] = rec;
     writeStore(this._keys.snoozed, this._snoozed);
     this._snoozeOpen = null;
     this._animateOut(item, 1, () => this._refresh());
@@ -1987,6 +2072,7 @@ const sel = {
   entity: { entity: {} },
   person: { entity: { filter: [{ domain: 'person' }] } },
   zones: { entity: { filter: [{ domain: 'zone' }], multiple: true } },
+  zone: { entity: { filter: [{ domain: 'zone' }] } },
   time: { time: {} },
   color: { color_rgb: {} },
   num: (min, max, unit, step = 1) => ({ number: { min, max, step, mode: 'box', unit_of_measurement: unit } }),
@@ -2046,6 +2132,10 @@ const LABELS = {
   type: 'Snooze',
   minutes: 'Duration',
   time: 'Until',
+  until_zone: 'Zone',
+  person: 'Person',
+  until_conditions: 'Conditions',
+  max_minutes: 'At most (optional)',
   id: 'ID',
   name: 'Name',
   color: 'Color',
@@ -2096,11 +2186,15 @@ const HELPERS = {
   scroll_direction: 'Right to left keeps each message on one line and scrolls it like a ticker. Message lines then doesn\'t apply.',
   zone_person: 'Used when the viewer has no person, e.g. a wall tablet. Groups can override it.',
   storage_key: 'Give a second copy of this card its own dismiss/snooze memory.',
+  until_zone: 'Ends the next time this person arrives. If they are there already, it waits until they leave and come back.',
+  person: 'Blank: whoever is viewing (or the zone person set for the group or card).',
+  until_conditions: 'Ends the next time all of these match, e.g.\n- entity: binary_sensor.rain_expected\n  state: "on"',
+  max_minutes: 'Without a limit it ends when that happens, or after 30 days.',
   template_name: 'Other cards can then reuse this card\'s groups, alerts and snooze options by this name.',
   templates: 'Pick shared templates, or type dashboard/name. This card\'s own groups and alerts are added on top.',
 };
 const ALERT_HELPERS = {
-  state: 'Comma separated. Leave all match fields blank to match "on".',
+  state: 'Comma separated. Use the state as shown (Clear, Unlocked) or its raw value (off, unlocked); not case-sensitive. Leave all match fields blank to match "on".',
   message: 'Placeholders: {name} {state} {value} {since} {attr:key}',
   combined_title: 'Used when 2+ entities match. Adds {count} and {names}.',
   conditions: '- entity: input_boolean.away_mode\n  state: "on"',
@@ -2188,6 +2282,9 @@ summary .sub { font-size: 12px; color: var(--secondary-text-color); font-weight:
 summary .tools { flex-direction: row; }
 .body { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
 .subhead { font-size: 13px; font-weight: 600; color: var(--secondary-text-color); margin-top: 6px; }
+.body .note { margin: 0; }
+.btnrow { display: flex; flex-wrap: wrap; gap: 8px; }
+summary > ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
 `;
 
 class NotificationStackCardEditor extends HTMLElement {
@@ -2196,6 +2293,7 @@ class NotificationStackCardEditor extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._open = new Set();
     this._bindings = [];
+    this._drafts = new Map(); // text typed into list fields, kept so a trailing comma survives the redraw
     this._tplOptions = [];
     this._tpl = { key: '', groups: [], alerts: 0, errors: [], loading: false };
   }
@@ -2351,8 +2449,8 @@ class NotificationStackCardEditor extends HTMLElement {
     return JSON.stringify({
       ready: !!customElements.get('ha-form'),
       s: this._snoozeList().length,
-      g: this._groups().length,
-      a: this._alerts().map((r) => [this._entityRows(r).length, toList(r.actions).length]),
+      g: this._groups().map((g) => toList(g.snooze_options).length),
+      a: this._alerts().map((r) => [this._entityRows(r).length, toList(r.actions).length, toList(r.snooze_options).length]),
     });
   }
 
@@ -2405,10 +2503,10 @@ class NotificationStackCardEditor extends HTMLElement {
     return b;
   }
 
-  _addButton(text, onClick) {
+  _addButton(text, onClick, icon = 'mdi:plus') {
     const b = document.createElement('button');
     b.className = 'add';
-    b.innerHTML = `<ha-icon icon="mdi:plus"></ha-icon><span>${esc(text)}</span>`;
+    b.innerHTML = `<ha-icon icon="${esc(icon)}"></ha-icon><span>${esc(text)}</span>`;
     b.addEventListener('click', onClick);
     return b;
   }
@@ -2647,25 +2745,41 @@ class NotificationStackCardEditor extends HTMLElement {
     ed.appendChild(this._heading('mdi:bell-sleep-outline', 'Snooze', 'Options people pick from when they snooze a notification.'));
     const keys = schemaKeys(SNOOZE_SCHEMA);
     ed.appendChild(this._form(SNOOZE_SCHEMA, () => this._topData(), (v) => this._setTop(v, keys)));
+    const save = (next) => this._setList('snooze_options', next, (l) => deepEq(l, DEFAULT_SNOOZE));
+    this._snoozeRows(ed, () => this._snoozeList(), save);
+    ed.appendChild(this._addButton('Add snooze option', () => save([...this._snoozeList(), { label: '1 hour', minutes: 60 }])));
+  }
 
+  /** Editable rows for a list of snooze options, read with `get()` and written with `save(next)`. */
+  _snoozeRows(container, get, save) {
     const list = document.createElement('div');
     list.className = 'list';
-    const opts = this._snoozeList();
+    const opts = get();
     const toRow = (o) => ({
       label: o.label,
-      type: o.until === 'tomorrow' ? 'tomorrow' : o.until ? 'until' : 'minutes',
+      type: o.until_zone ? 'zone' : !isBlank(o.until_conditions) ? 'conditions' : o.until === 'tomorrow' ? 'tomorrow' : o.until ? 'until' : 'minutes',
       minutes: o.minutes ?? (o.hours ? o.hours * 60 : undefined),
+      max_minutes: hasEvent(o) ? o.minutes ?? (o.hours ? o.hours * 60 : undefined) : undefined,
       time: o.until && o.until !== 'tomorrow' ? o.until : undefined,
+      until_zone: o.until_zone,
+      person: o.person,
+      until_conditions: o.until_conditions,
     });
     const fromRow = (r) => {
       const o = { label: r.label || '' };
       if (r.type === 'tomorrow') o.until = 'tomorrow';
       else if (r.type === 'until') o.until = (r.time || '08:00').slice(0, 5);
-      else o.minutes = Number(r.minutes) || 5;
+      else if (r.type === 'zone' || r.type === 'conditions') {
+        if (r.type === 'zone') {
+          o.until_zone = r.until_zone || 'zone.home';
+          if (r.person) o.person = r.person;
+        } else o.until_conditions = isBlank(r.until_conditions) ? [{ entity: '', state: 'on' }] : r.until_conditions;
+        if (Number(r.max_minutes) > 0) o.minutes = Number(r.max_minutes);
+      } else o.minutes = Number(r.minutes) || 5;
       return o;
     };
     const schemaFor = (i) => {
-      const row = toRow(this._snoozeList()[i] || {});
+      const row = toRow(get()[i] || {});
       return [
         grid(
           { name: 'label', selector: sel.text },
@@ -2675,35 +2789,85 @@ class NotificationStackCardEditor extends HTMLElement {
               { value: 'minutes', label: 'For a duration' },
               { value: 'until', label: 'Until a time of day' },
               { value: 'tomorrow', label: 'Until tomorrow (midnight)' },
+              { value: 'zone', label: 'Until someone arrives in a zone' },
+              { value: 'conditions', label: 'Until conditions match' },
             ]),
           }
         ),
         ...(row.type === 'minutes' ? [{ name: 'minutes', selector: sel.num(1, 10080, 'min') }] : []),
         ...(row.type === 'until' ? [{ name: 'time', selector: sel.time }] : []),
+        ...(row.type === 'zone'
+          ? [grid({ name: 'until_zone', selector: sel.zone }, { name: 'person', selector: sel.person })]
+          : []),
+        ...(row.type === 'conditions' ? [{ name: 'until_conditions', selector: sel.yaml }] : []),
+        ...(row.type === 'zone' || row.type === 'conditions'
+          ? [{ name: 'max_minutes', selector: sel.num(1, 43200, 'min') }]
+          : []),
       ];
     };
-    const save = (next) => this._setList('snooze_options', next, (l) => deepEq(l, DEFAULT_SNOOZE));
     const move = (i, d) => {
-      const next = this._snoozeList();
+      const next = get().map(clone);
       [next[i], next[i + d]] = [next[i + d], next[i]];
       save(next);
     };
-    const del = (i) => save(this._snoozeList().filter((_, j) => j !== i));
+    const del = (i) => save(get().filter((_, j) => j !== i));
 
     opts.forEach((_, i) => {
       const form = this._form(
         () => schemaFor(i),
-        () => toRow(this._snoozeList()[i] || {}),
+        () => toRow(get()[i] || {}),
         (v) => {
-          const next = this._snoozeList();
+          const next = get().map(clone);
           next[i] = fromRow(v);
           save(next);
         }
       );
       list.appendChild(this._rowBox(form, i, opts.length, move, del));
     });
-    ed.appendChild(list);
-    ed.appendChild(this._addButton('Add snooze option', () => save([...this._snoozeList(), { label: '1 hour', minutes: 60 }])));
+    container.appendChild(list);
+  }
+
+  /**
+   * A collapsed "Snooze options" section for one group or alert. Without its own options it says which
+   * options apply (and lists them); "Customize" copies those in to edit, "Reset to default" removes them.
+   */
+  _snoozeOverride(b, { key, own, setOwn, inherited, ownText, inheritedText }) {
+    const labels = (l) => normalizeSnooze(l).map((o) => o.label).join(', ') || 'none';
+    b.appendChild(
+      this._panel(
+        key,
+        (s) => {
+          s.innerHTML = '<ha-icon icon="mdi:bell-sleep-outline"></ha-icon><span class="sum"></span>';
+          const sum = s.querySelector('.sum');
+          this._live(() => {
+            const n = own().length;
+            sum.innerHTML = `Snooze options <span class="sub">${esc(n ? `${n} of its own` : `default (${inherited().from})`)}</span>`;
+          });
+        },
+        (body) => {
+          const note = document.createElement('p');
+          note.className = 'note';
+          body.appendChild(note);
+          this._live(() => {
+            const inh = inherited();
+            note.textContent = own().length ? ownText(inh, labels(inh.list)) : inheritedText(inh, labels(inh.list));
+          });
+          if (own().length) {
+            this._snoozeRows(body, own, setOwn);
+            const row = document.createElement('div');
+            row.className = 'btnrow';
+            row.append(
+              this._addButton('Add snooze option', () => setOwn([...own(), { label: '1 hour', minutes: 60 }])),
+              this._addButton('Reset to default', () => setOwn([]), 'mdi:restore')
+            );
+            body.appendChild(row);
+          } else {
+            body.appendChild(this._addButton('Customize', () => setOwn(clone(toList(inherited().list))), 'mdi:pencil-outline'));
+          }
+        },
+        []
+      )
+    );
   }
 
   // ----- groups -----
@@ -2810,7 +2974,7 @@ class NotificationStackCardEditor extends HTMLElement {
           icon.setAttribute('icon', cur.icon || 'mdi:shape-outline');
         });
       };
-      const body = (b) =>
+      const body = (b) => {
         b.appendChild(
           this._form(
             schema,
@@ -2831,6 +2995,22 @@ class NotificationStackCardEditor extends HTMLElement {
             GROUP_HELPERS
           )
         );
+        this._snoozeOverride(b, {
+          key: `gs:${i}`,
+          own: () => toList((this._groups()[i] || {}).snooze_options),
+          setOwn: (list) => {
+            const next = this._groups().map(clone);
+            if (list.length) next[i].snooze_options = list;
+            else delete next[i].snooze_options;
+            this._setList('groups', next);
+          },
+          inherited: () => ({ from: "card's", list: this._snoozeList() }),
+          inheritedText: (_, l) =>
+            `Uses this card's snooze options: ${l}. Customize to give alerts in this group their own; an alert can still set its own.`,
+          ownText: (_, l) =>
+            `Alerts in this group use these instead of this card's options (${l}), unless an alert sets its own. Reset to default goes back to the card's.`,
+        });
+      };
       const move = (d) => {
         const next = this._groups().map(clone);
         [next[i], next[i + d]] = [next[i + d], next[i]];
@@ -2857,6 +3037,12 @@ class NotificationStackCardEditor extends HTMLElement {
   }
 
   // ----- alerts -----
+
+  /** Prefix for the snooze note when this alert can't be snoozed anyway. */
+  _snoozeOff(i) {
+    if (this._config.snooze === false) return 'Snoozing is turned off for this card, so these won\'t show. ';
+    return this._inherited(this._alerts()[i] || {}).snoozableEff ? '' : 'This alert isn\'t snoozable, so these won\'t show. ';
+  }
 
   _alertSchema(i) {
     const rule = this._alerts()[i] || {};
@@ -2909,7 +3095,13 @@ class NotificationStackCardEditor extends HTMLElement {
     };
   }
 
-  _alertToForm(rule) {
+  /** What was typed into a comma-separated field, while it still means `value`; otherwise the value as text. */
+  _draftText(key, value) {
+    const d = this._drafts.get(key);
+    return d !== undefined && deepEq(textToList(d), value) ? d : listToText(value);
+  }
+
+  _alertToForm(rule, i) {
     const inh = this._inherited(rule);
     return {
       group: rule.group ? String(rule.group) : '__none',
@@ -2922,8 +3114,8 @@ class NotificationStackCardEditor extends HTMLElement {
       combine: !!rule.combine,
       combined_title: rule.combined_title,
       combined_message: rule.combined_message,
-      state: listToText(rule.state),
-      state_not: listToText(rule.state_not),
+      state: this._draftText(`${i}:state`, rule.state),
+      state_not: this._draftText(`${i}:state_not`, rule.state_not),
       above: rule.above,
       below: rule.below,
       attribute: rule.attribute,
@@ -3001,13 +3193,39 @@ class NotificationStackCardEditor extends HTMLElement {
         b.appendChild(
           this._form(
             () => this._alertSchema(i),
-            () => this._alertToForm(this._alerts()[i] || {}),
-            (v) => this._setAlert(i, this._alertFromForm(this._alerts()[i] || {}, v)),
+            () => this._alertToForm(this._alerts()[i] || {}, i),
+            (v) => {
+              ['state', 'state_not'].forEach((k) => this._drafts.set(`${i}:${k}`, v[k] ?? ''));
+              this._setAlert(i, this._alertFromForm(this._alerts()[i] || {}, v));
+            },
             ALERT_HELPERS
           )
         );
         this._buildEntityRows(b, i);
         this._buildActionRows(b, i);
+        this._snoozeOverride(b, {
+          key: `as:${rule.id || i}`,
+          own: () => toList((this._alerts()[i] || {}).snooze_options),
+          setOwn: (list) => {
+            const next = clone(this._alerts()[i] || {});
+            if (list.length) next.snooze_options = list;
+            else delete next.snooze_options;
+            this._setAlert(i, next);
+          },
+          inherited: () => {
+            const cur = this._alerts()[i] || {};
+            const g = cur.group ? this._allGroups().get(String(cur.group)) : undefined;
+            return normalizeSnooze(g?.snooze_options).length
+              ? { from: `${g.name || g.id} group's`, src: `the ${g.name || g.id} group's options`, list: g.snooze_options }
+              : { from: "card's", src: "this card's options", list: this._snoozeList() };
+          },
+          inheritedText: (inh, l) => {
+            const off = this._snoozeOff(i);
+            return `${off}Uses ${inh.src}: ${l}. Customize to give this alert its own; they replace ${inh.src} for this alert only.`;
+          },
+          ownText: (inh, l) =>
+            `${this._snoozeOff(i)}This alert uses its own options below instead of ${inh.src} (${l}). Reset to default goes back to them.`,
+        });
       };
       const move = (d) => {
         const next = this._alerts().map(clone);
@@ -3143,6 +3361,23 @@ class NotificationStackCardEditor extends HTMLElement {
 
 // ---------- registration ----------
 
+/** Card picker ("By entity"): a ready-made alert for entities where one is obvious; nothing for the rest. */
+const SUGGEST_BINARY = {
+  moisture: 'critical', smoke: 'critical', gas: 'critical', carbon_monoxide: 'critical', safety: 'critical',
+  door: 'warning', window: 'warning', garage_door: 'warning', opening: 'warning', problem: 'warning',
+};
+function suggestFor(hass, entityId) {
+  const so = hass?.states?.[entityId];
+  const [domain, objectId] = String(entityId).split('.');
+  if (!so || !objectId) return null;
+  const alert = { id: `alert_${objectId}`, entity: entityId };
+  if (domain === 'lock') Object.assign(alert, { severity: 'warning', state: ['unlocked', 'open', 'jammed'] });
+  else if (domain === 'binary_sensor' && SUGGEST_BINARY[so.attributes.device_class]) {
+    alert.severity = SUGGEST_BINARY[so.attributes.device_class];
+  } else return null;
+  return { label: 'Notification when it needs attention', config: { type: CARD_TYPE, alerts: [alert] } };
+}
+
 if (!customElements.get('notification-stack-card-editor')) {
   customElements.define('notification-stack-card-editor', NotificationStackCardEditor);
 }
@@ -3154,6 +3389,8 @@ if (!customElements.get('notification-stack-card')) {
     name: 'Notification Stack Card',
     description: 'Stacked, tap-to-expand alerts with groups, templates, action buttons, dismiss and snooze.',
     preview: true,
+    documentationURL: 'https://github.com/Big-Xan/notification-stack-card',
+    getEntitySuggestion: suggestFor,
   });
   console.info(`%c NOTIFICATION-STACK-CARD %c v${NSC_VERSION} `, 'background:#c33;color:#fff', 'background:#333;color:#fff');
 }
