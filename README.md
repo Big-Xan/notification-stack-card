@@ -36,7 +36,17 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
 ## Installation
 
-### HACS (recommended)
+### Marketplace (Home Assistant 2026.11 and later, recommended)
+
+1. Go to **Settings → Marketplace** and select **Add from link** in the upper-right corner.
+2. Enter `https://github.com/Big-Xan/notification-stack-card` and select **Add**. If asked for a type, choose **Dashboards**. Adding a link needs a GitHub connection; the Marketplace asks for one if you haven't connected it yet.
+3. Open **Notification Stack Card**, select **Install**, and reload the browser.
+
+The Marketplace adds the dashboard resource for you and offers new versions under **Settings → Updates**, so there's nothing to bump. If you manage dashboard resources in YAML, the install dialog shows the line to add instead.
+
+Already installed through HACS? Nothing to do: when Home Assistant updates to 2026.11, the card and its updates move to the Marketplace.
+
+### HACS (before Home Assistant 2026.11)
 
 1. In HACS, open the ⋮ menu → **Custom repositories**.
 2. Add `https://github.com/Big-Xan/notification-stack-card` with type **Dashboard**.
