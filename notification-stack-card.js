@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.9.2
+ * notification-stack-card.js  v0.9.3
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -14,7 +14,7 @@
  * in Home Assistant.
  */
 
-const NSC_VERSION = '0.9.2';
+const NSC_VERSION = '0.9.3';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -165,10 +165,14 @@ function relTime(ts, long = false) {
 
 /** "HH:MM" (seconds allowed) -> minutes after midnight, or null if it isn't a valid 24-hour time. */
 const minutesOf = (t) => {
-  const m = String(t ?? '').match(/^(\d{1,2}):(\d{2})/);
-  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
+  const m = String(t ?? '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59 || Number(m[3] ?? 0) > 59) return null;
   return Number(m[1]) * 60 + Number(m[2]);
 };
+
+/** A list of entity IDs as one text, the same whatever their order. Entity IDs can't contain commas, so two
+ * different lists never give the same text. */
+const entityList = (list) => [...new Set(list)].sort().join(',');
 
 /** True while `now` is inside a {start, end} window; windows may cross midnight. */
 function inQuietHours(q, now = new Date()) {
@@ -238,7 +242,11 @@ const normalizeGroups = (groups) => {
   return map;
 };
 
+// What couldn't be saved (blocked or full storage), per key: it lasts until reload, shared by the cards on the page.
+const unsaved = new Map();
+
 function readStore(key) {
+  if (unsaved.has(key)) return clone(unsaved.get(key));
   try {
     const obj = JSON.parse(window.localStorage.getItem(key) || '{}');
     return isObj(obj) ? obj : {};
@@ -250,8 +258,9 @@ function readStore(key) {
 function writeStore(key, obj) {
   try {
     window.localStorage.setItem(key, JSON.stringify(obj));
+    unsaved.delete(key);
   } catch (_) {
-    /* blocked storage: state lasts until reload */
+    unsaved.set(key, clone(obj));
   }
 }
 
@@ -578,6 +587,7 @@ class NotificationStackCard extends HTMLElement {
     this._pnSub = null;
     this._pnFailed = false;
     this._busy = new Map(); // "alertId:button" -> token of the request in flight
+    this._requests = new Set(); // {id, ended} per request in flight that dismisses when it succeeds
     this._failed = null; // "alertId:button" that just failed, shown briefly
     this._sig = '';
     this._snoozedCount = 0;
@@ -976,7 +986,10 @@ class NotificationStackCard extends HTMLElement {
       const ents = (rule.entities ? toList(rule.entities) : toList(rule.entity)).map((e) =>
         typeof e === 'string' ? { entity: e } : e || {}
       );
-      if (rule.combine) checked.add(`${rule.__id}:combined`);
+      // A combined alert's ID names its entities, so two different combined alerts with the same id (or two
+      // unnamed ones, both r0) never share dismiss/snooze memory; identical ones (one template, two cards) still do.
+      const combinedId = rule.combine && `${rule.__id}:combined~${entityList(ents.map((e) => e.entity).filter(Boolean))}`;
+      if (combinedId) checked.add(combinedId);
       else ents.forEach((ent) => ent.entity && checked.add(`${rule.__id}:${ent.entity}`));
       if (!groupOk(g)) continue;
       if (rule.conditions && !this._conditionsPass(rule.conditions)) continue;
@@ -1013,7 +1026,7 @@ class NotificationStackCard extends HTMLElement {
 
       if (rule.combine) {
         hits.sort((a, b) => timeOf(b.so.last_changed) - timeOf(a.so.last_changed));
-        out.push(make(`${rule.__id}:combined`, hits));
+        out.push(make(combinedId, hits));
       } else {
         hits.forEach((h) => out.push(make(`${rule.__id}:${h.ent.entity}`, [h])));
       }
@@ -1022,13 +1035,19 @@ class NotificationStackCard extends HTMLElement {
     if (cfg.persistent_notifications) {
       const g = cfg.persistent_group ? this._groups.get(String(cfg.persistent_group)) : undefined;
       const base = this._inherit({ severity: this._raw.persistent_severity, icon: this._raw.persistent_icon }, g);
-      const allowed = listed(g) && this._zoneAllows(g) && groupOk(g) && !this._quietBlocks(g, base.severity, now);
-      for (const n of allowed ? Object.values(this._pn) : []) {
+      // Like rules, the group filter, zones and quiet hours only hide them; the group's conditions leave them out,
+      // and turning off and on again makes them new (ends a snooze, stops a request from dismissing).
+      const hidden = !listed(g) || !this._zoneAllows(g) || this._quietBlocks(g, base.severity, now);
+      const conditionsOk = groupOk(g);
+      for (const n of Object.values(this._pn)) {
         if (!n || !n.notification_id) continue;
+        checked.add(`pn:${n.notification_id}`);
+        if (!conditionsOk) continue;
         out.push({
           ...base,
           id: `pn:${n.notification_id}`,
           kind: 'pn',
+          hidden,
           notification_id: n.notification_id,
           icon: base.icon || DEFAULTS.persistent_icon,
           title: stripMd(n.title) || 'Notification',
@@ -1056,11 +1075,19 @@ class NotificationStackCard extends HTMLElement {
     const covered = (seen, a) => Array.isArray(seen) && a.tokens.every((t) => seen.includes(t));
     // A dismissal ends when its alert comes with something new, or this card's rule for it was checked and
     // nothing matched. Records this card can't produce belong to another card (or a removed alert) and are left.
-    const ended = (id, a) => (a ? !covered(this._dismissed[id], a) : checked.has(id));
+    const ended = (seen, id, a) => (a ? !covered(seen, a) : checked.has(id));
     const dIds = [];
     const sIds = [];
+    this._checked = checked;
+    // An alert whose rule was checked and didn't match has ended: a request started before then doesn't dismiss
+    // what comes next (conditions off and on make a new incident without the entity changing).
+    this._requests.forEach((q) => checked.has(q.id) && !active.has(q.id) && (q.ended = true));
+    // Every alert as defined now, including hidden, dismissed and snoozed ones (see _onActionButton).
+    this._model = active;
+    // Combined alerts remembered by 0.9.2 and earlier ("id:combined") aren't carried over: those records don't
+    // say which card or entities they belonged to, so they're ignored and the alert shows once more.
     for (const id of Object.keys(this._dismissed)) {
-      if (ended(id, active.get(id))) {
+      if (ended(this._dismissed[id], id, active.get(id))) {
         delete this._dismissed[id];
         dIds.push(id);
       }
@@ -1074,7 +1101,8 @@ class NotificationStackCard extends HTMLElement {
         s.armed = true;
         sIds.push(id);
       }
-      if (!s || !(s.until > nowMs) || (a && !covered(s.tokens, a)) || (met && s.armed)) {
+      // Like a dismissal, a snooze ends when its alert comes with something new or stopped matching.
+      if (!s || !(s.until > nowMs) || ended(s.tokens, id, a) || (met && s.armed)) {
         delete this._snoozed[id];
         sIds.push(id);
       }
@@ -1244,14 +1272,16 @@ class NotificationStackCard extends HTMLElement {
   _update() {
     if (!this._hass || !this._config || !this._stack) return;
     const alerts = this._computeAlerts();
+    // The model stays current even when nothing visible changed (an entity joining a combined alert through an
+    // attribute changes no text or time), so dismiss and snooze always use the latest tokens.
+    this._alerts = alerts;
+    this._blocks = this._makeBlocks(alerts);
     const sig =
       alerts.map((a) => `${a.id}|${a.ts}|${a.severity}|${a.icon}|${a.color}|${a.bg}|${a.fg}|${a.title}|${a.message}`).join('§') +
       `#${this._expanded}#${[...this._openGroups].join(',')}#${this._confirming || ''}#${this._snoozeOpen || ''}#${this._snoozedCount}` +
       `#${[...this._busy.keys()].join(',')}#${this._failed || ''}`;
     if (sig === this._sig) return;
     this._sig = sig;
-    this._alerts = alerts;
-    this._blocks = this._makeBlocks(alerts);
     this._render();
   }
 
@@ -1394,10 +1424,9 @@ class NotificationStackCard extends HTMLElement {
     return id && this._hass.states[id] ? id : '';
   }
 
-  /** Whether an alert ID comes from one of this card's rules or its Home Assistant notifications. */
+  /** Whether this card can show an alert with this ID (one of its rules, or its Home Assistant notifications). */
   _ownsAlertId(id) {
-    const rule = id.slice(0, id.lastIndexOf(':'));
-    return (rule === 'pn' && !!this._config.persistent_notifications) || this._rules.some((r) => r.__id === rule);
+    return (id.startsWith('pn:') && !!this._config.persistent_notifications) || !!this._checked?.has(id);
   }
 
   /** True when an arrival/conditions snooze's event is happening now; null for a snooze that only uses time. */
@@ -1876,8 +1905,11 @@ class NotificationStackCard extends HTMLElement {
     // The alert as it was when tapped: if it turns into a new incident meanwhile, its new tokens aren't
     // covered by this dismissal, so the new incident still shows.
     const store = this._keys.dismissed;
+    const request = { id: alert.id, ended: false };
+    if (dismiss) this._requests.add(request);
     const token = {};
     const release = () => {
+      this._requests.delete(request);
       if (this._busy.get(key) !== token) return;
       this._busy.delete(key);
       this._refresh();
@@ -1888,7 +1920,12 @@ class NotificationStackCard extends HTMLElement {
     // connection rejects the request, so it can't stay busy for good.
     try {
       await result;
-      if (dismiss && this._keys.dismissed === store) this._dismiss(alert);
+      // A late answer dismisses only if the alert still has the button that was tapped, unchanged, and can still
+      // be dismissed, and it hasn't stopped matching meanwhile. Hidden or snoozed meanwhile still counts; edited
+      // away, removed or ended doesn't. The button counts as unchanged only if it's exactly the same (key order too).
+      const now = this._model?.get(alert.id);
+      const same = now?.dismissible && JSON.stringify(now.actions[j]) === JSON.stringify(b);
+      if (dismiss && this._keys.dismissed === store && same && !request.ended) this._dismiss(alert);
     } catch (e) {
       if (e?.nscOwn) this._fire('hass-notification', { message: e.message });
       if (this._busy.get(key) === token) this._flashFailed(key);
@@ -1971,6 +2008,11 @@ class NotificationStackCard extends HTMLElement {
     if (alert.kind === 'pn') {
       const id = alert.notification_id;
       const n = this._pn[id];
+      // Home Assistant dismisses by ID only: if a newer notification replaced this one meanwhile, leave it.
+      if (!n || n.created_at !== alert.ts) {
+        if (!batch) this._refresh();
+        return undefined;
+      }
       delete this._pn[id];
       request = Promise.resolve().then(() => this._hass.callService('persistent_notification', 'dismiss', { notification_id: id }));
       request.catch(() => {
@@ -2007,7 +2049,14 @@ class NotificationStackCard extends HTMLElement {
     el.style.setProperty('--x', `${dir * (el.offsetWidth + 40)}px`);
     el.style.opacity = '0';
     el.style.pointerEvents = 'none';
-    setTimeout(done, 240);
+    setTimeout(() => {
+      done();
+      // Still showing (it came back as new meanwhile, or a snooze ended): slide it back in.
+      if (this._items.get(el.dataset.id) !== el) return;
+      el.style.removeProperty('--x');
+      el.style.opacity = '';
+      el.style.pointerEvents = '';
+    }, 240);
   }
 
   _onPointerDown(ev) {

@@ -48,7 +48,7 @@ HACS adds the dashboard resource for you and updates its version on every update
 
 1. Download `notification-stack-card.js` from the [latest release](https://github.com/Big-Xan/notification-stack-card/releases/latest) and copy it to `/config/www/`.
 2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.9.2`
+   - URL: `/local/notification-stack-card.js?v=0.9.3`
    - Type: JavaScript module
 3. Reload the browser. Bump the `?v=` number after every update.
 
@@ -295,9 +295,11 @@ Both are remembered per device in the browser, under the card's `storage_key`. A
 - for a combined alert, a new entity starts matching, or
 - its `conditions` (or its group's) turn off and on again. For example, a window alert that only shows while armed comes back the next time you arm, if the window is still open.
 
+A change to an attribute alone (a battery level dropping further, say) doesn't count as new, since the entity's state hasn't changed.
+
 Quiet hours, zones and `show_groups` only hide an alert, so a dismissed alert stays dismissed through them, unless one of the changes above happens while it's hidden. Snoozes also end at their time.
 
-Cards with the same `storage_key` share this memory: dismissing or snoozing on one updates the others straight away, including in other tabs of the same browser. Each card only ends dismissals for its own alerts, so cards with different alerts can share a key.
+Cards with the same `storage_key` share this memory: dismissing or snoozing on one updates the others straight away, including in other tabs of the same browser. Each card only ends dismissals for its own alerts, so cards with different alerts can share a key. Combined alerts are told apart by their entities too, so two with the same `id` but different entities don't share memory.
 
 Dismissing a Home Assistant notification removes it in Home Assistant for everyone. If Home Assistant can't remove it, it shows again. **Clear** works the same way for each notification.
 

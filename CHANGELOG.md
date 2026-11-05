@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.3 — 2026-11-05
+
+A fix release. No options changed and existing configs keep working.
+
+**Fixes**
+
+- **Combined alerts with the same `id` no longer share dismiss/snooze memory unless they watch the same entities.** Two different combined alerts on one `storage_key` (including two unnamed ones in separate cards) could clear or overwrite each other's dismissals, and **Unsnooze all** could clear the other card's snooze. Identical combined alerts on two cards, such as one template used twice, still share. **After updating, a combined alert you had dismissed or snoozed shows once more**; dismiss or snooze it again. Older versions didn't save which entities it covered, so those records can't be safely carried over.
+- **Dismissing a combined alert sticks when an entity joined it through an attribute.** When a battery dropped below the limit without the visible text or time changing, the card kept the old list of entities, so the alert came straight back after X.
+- **Snoozes now end when an alert's conditions (or its group's) turn off and on again**, as dismissals already did and the README describes. This includes Home Assistant notifications in a group with conditions. Before, a snoozed alert stayed hidden until its time ran out.
+- **A button that finishes after things changed** only dismisses if the alert still has that button, unchanged, can still be dismissed, and hasn't ended meanwhile. A cosmetic edit, or the alert being hidden or snoozed, still lets it dismiss. Replacing the button, removing the alert, or its conditions turning off and on (which makes it a new alert) doesn't.
+- **A button on a Home Assistant notification no longer dismisses a newer one.** If Home Assistant replaced the notification (same ID, new content) while the button's request ran, the new one stays.
+- **A notification could stay invisible** after you dismissed, swiped or snoozed it, if it came back at that moment (rain starting just as you snooze "Unless it rains", say). It now slides back in.
+- **When the browser blocks storage or it's full**, every dismissal and snooze now lasts until the page reloads. Before, only the latest one did.
+- **Times must be `HH:MM` or `H:MM`, optionally with seconds.** A time with extra text, such as `07:00am`, was read as `07:00`; it's now ignored like any other invalid time.
+
 ## 0.9.2 — 2026-11-04
 
 A fix release. No options changed and existing configs keep working.
@@ -7,7 +22,7 @@ A fix release. No options changed and existing configs keep working.
 **Fixes**
 
 - **Dismissals could disappear when another card used the same `storage_key`**, including the default key. Opening the card picker (its preview uses the default key) or a second card with different alerts cleared the first card's dismissals. A card now only ends dismissals for alerts it can show. Two cards with unnamed alerts no longer clear each other's.
-- **Cards on the same key now stay in step.** Dismissing or snoozing on one card updates the others straight away, also in other tabs, and two cards writing at once no longer lose each other's changes. **Unsnooze all** clears only that card's snoozes.
+- **Cards on the same key now stay in step.** Dismissing or snoozing on one card updates the others straight away, also in other tabs, and two cards on the same page no longer overwrite each other's changes. **Unsnooze all** clears only that card's snoozes.
 - **A button action that can't run no longer dismisses.** A refused link, `navigate` without a path or an unknown action keeps the notification and shows *Failed*. A button with no action (or `action: none`) still just dismisses.
 - **Service buttons stay busy until Home Assistant answers.** The 30-second limit is gone, so a long script can't be started twice by a second tap.
 - **Conditions turning off and on while an alert is hidden now count.** If it happens during quiet hours, outside a zone or under `show_groups`, a dismissed alert comes back once it can show again, as the README already described.
