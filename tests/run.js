@@ -765,7 +765,399 @@ test('Y14 combined alert with fixed text: a window closing and reopening still b
   const hidden = ids(el).length === 0;
   el.hass = { ...hass, states: { ...closed, 'binary_sensor.b': st('binary_sensor.b', 'on', {}, '2026-11-01T14:00:00Z') } };
   return { hidden, back: ids(el) };
-}, (r) => eq(r, { hidden: true, back: ['w:combined'] }));
+}, (r) => r.hidden && r.back.length === 1 && /^w:combined~/.test(r.back[0]));
+
+// ---------- 0.9.3: combined IDs, current model, late answers, exact times ----------
+test('P1a unnamed combined alerts in two cards keep each other\'s dismissals', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'on') });
+  const A = { alerts: [{ entities: ['binary_sensor.a'], combine: true }] };
+  let a = mount(A, hass);
+  a._dismiss(a._alerts[0]);
+  mount({ alerts: [{ entities: ['binary_sensor.b'], combine: true }] }, hass);
+  a.remove();
+  a = mount(A, hass);
+  return { a: ids(a), stored: Object.keys(JSON.parse(localStorage.getItem('nsc-dismissed:default') || '{}')).length };
+}, (r) => eq(r, { a: [], stored: 1 }));
+
+test('P1b same explicit id, different entity sets: neither card ends the other\'s dismissal', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'on') });
+  const A = { alerts: [{ id: 'common', combine: true, entity: 'binary_sensor.a' }] };
+  let a = mount(A, hass);
+  a._dismiss(a._alerts[0]);
+  const b = mount({ alerts: [{ id: 'common', combine: true, entity: 'binary_sensor.b' }] }, hass);
+  const bShows = ids(b).length;
+  b._dismiss(b._alerts[0]); // must not overwrite A's record either
+  a.remove();
+  a = mount(A, hass);
+  return { a: ids(a), bShows };
+}, (r) => eq(r, { a: [], bShows: 1 }));
+
+test('P1c (control) two cards with the SAME combined rule still share a dismissal', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'on') });
+  const cfg = { alerts: [{ id: 'w', combine: true, entities: ['binary_sensor.a', 'binary_sensor.b'] }] };
+  const one = mount(cfg, hass);
+  const two = mount(cfg, hass);
+  one._dismiss(one._alerts[0]);
+  await tick(5);
+  return ids(two);
+}, (r) => eq(r, []));
+
+test('P2u Unsnooze all keeps another card\'s same-id combined snooze', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'on') });
+  const a = mount({ alerts: [{ id: 'same', combine: true, entity: 'binary_sensor.a' }] }, hass);
+  a._snooze(a._items.get(a._alerts[0].id), a._alerts[0], 0);
+  await tick(300);
+  a.remove();
+  const b = mount({ alerts: [{ id: 'same', combine: true, entity: 'binary_sensor.b' }] }, hass);
+  b._confirming = 'unsnooze';
+  b._onUnsnoozeAll();
+  return Object.keys(JSON.parse(localStorage.getItem('nsc-snoozed:default') || '{}')).length;
+}, (r) => r === 1);
+
+// ---------- P2: stale alert model ----------
+test('P2s an entity joining a combined alert by attribute: dismiss covers it and sticks', async () => {
+  const s = { 'sensor.a': st('sensor.a', 'ok', { battery: 10 }, '2026-11-01T12:00:00Z'), 'sensor.b': st('sensor.b', 'ok', { battery: 40 }, '2026-11-01T10:00:00Z') };
+  const hass = makeHass(s);
+  const el = mount({ alerts: [{ id: 'low', combine: true, entities: ['sensor.a', 'sensor.b'], attribute: 'battery', below: 20, title: 'Low batteries', message: 'Check batteries' }] }, hass);
+  el.hass = { ...hass, states: { ...s, 'sensor.b': st('sensor.b', 'ok', { battery: 5 }, '2026-11-01T10:00:00Z') } };
+  const tokens = el._alerts[0].tokens.length;
+  el._dismiss(el._alerts[0]);
+  return { tokens, shownAfterDismiss: ids(el) };
+}, (r) => eq(r, { tokens: 2, shownAfterDismiss: [] }));
+
+// ---------- P1/P2: old request after reconfiguration ----------
+const lockCfg = (extra) => ({ alerts: [{ id: 'door', entity: 'lock.front', state: 'unlocked', ...extra,
+  actions: [{ name: 'Lock', dismiss: true, tap_action: { action: 'perform-action', perform_action: 'lock.lock' } }] }] });
+test('R1 (intent) a cosmetic edit mid-request: the tapped Lock still dismisses on success', async (lockCfg) => {
+  let resolve;
+  const hass = makeHass({ 'lock.front': st('lock.front', 'unlocked') }, { callService: () => new Promise((r) => (resolve = r)) });
+  const el = mount(lockCfg, hass);
+  el.shadowRoot.querySelector('[data-act]').click();
+  await tick(5);
+  el.setConfig({ ...lockCfg, title: 'Renamed' });
+  resolve({});
+  await tick(10);
+  return ids(el);
+}, (r) => eq(r, []), lockCfg({}));
+test('R2 edit made the alert non-dismissible mid-request: the old request does not dismiss it', async (cfgs) => {
+  let resolve;
+  const hass = makeHass({ 'lock.front': st('lock.front', 'unlocked') }, { callService: () => new Promise((r) => (resolve = r)) });
+  const el = mount(cfgs[0], hass);
+  el.shadowRoot.querySelector('[data-act]').click();
+  await tick(5);
+  el.setConfig(cfgs[1]);
+  resolve({});
+  await tick(10);
+  return ids(el);
+}, (r) => eq(r, ['door:lock.front']), [lockCfg({}), lockCfg({ dismissible: false })]);
+
+// ---------- P3: malformed times ----------
+test('P3 quiet hours with trailing junk are ignored; HH:MM:SS still works', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on') });
+  const mk = (start, end) => mount({ groups: [{ id: 'g', quiet_hours: { start, end } }], alerts: [{ id: 'a', group: 'g', entity: 'binary_sensor.a' }] }, hass);
+  return { junk: ids(mk('00:00garbage', '23:59garbage')).length, seconds: ids(mk('00:00:00', '23:59:00')).length };
+}, (r) => eq(r, { junk: 1, seconds: 0 }));
+
+// ---------- 0.9.3: late answers after an edit, old combined records ----------
+const LOCK = { name: 'Lock', dismiss: true, tap_action: { action: 'perform-action', perform_action: 'lock.lock' } };
+const door = (actions, extra = {}) => ({ alerts: [{ id: 'door', entity: 'lock.front', state: 'unlocked', actions, ...extra }] });
+const late = async ([before, after, snooze]) => {
+  let resolve;
+  const hass = makeHass({ 'lock.front': st('lock.front', 'unlocked') }, { callService: () => new Promise((r) => (resolve = r)) });
+  const el = mount(before, hass);
+  el.shadowRoot.querySelector('[data-act]').click();
+  await tick(5);
+  if (snooze) { el._snooze(el._items.get('door:lock.front'), el._alerts[0], 0); await tick(300); }
+  if (after) el.setConfig(after);
+  resolve({});
+  await tick(10);
+  const stored = Object.keys(JSON.parse(localStorage.getItem('nsc-dismissed:default') || '{}'));
+  if (after && !after.alerts.length) el.setConfig(before); // put the alert back
+  return { shown: ids(el), stored };
+};
+test('F1a button replaced while the request ran: the old answer does not dismiss', late,
+  (r) => eq(r, { shown: ['door:lock.front'], stored: [] }),
+  [door([LOCK]), door([{ name: 'Notify', dismiss: false, tap_action: { action: 'perform-action', perform_action: 'notify.notify' } }])]);
+test('F1b alert removed while the request ran: no ghost dismissal when it comes back', late,
+  (r) => eq(r, { shown: ['door:lock.front'], stored: [] }), [door([LOCK]), { alerts: [] }]);
+test('F1c (intent) snoozed while the request ran: the requested dismissal still happens', late,
+  (r) => eq(r.stored, ['door:lock.front']), [door([LOCK]), null, true]);
+test('F1d (intent) cosmetic edit: still dismisses', late,
+  (r) => eq(r, { shown: [], stored: ['door:lock.front'] }), [door([LOCK]), door([LOCK], { title: 'Renamed' })]);
+test('F1e (intent) made non-dismissible: stays', late,
+  (r) => eq(r, { shown: ['door:lock.front'], stored: [] }), [door([LOCK]), door([LOCK], { dismissible: false })]);
+test('F1f (intent) hidden by quiet hours meanwhile: still dismisses', late,
+  (r) => eq(r.stored, ['door:lock.front']),
+  [{ groups: [{ id: 'g' }], ...door([LOCK], { group: 'g' }) }, { groups: [{ id: 'g', quiet_hours: { start: '00:00', end: '23:59' } }], ...door([LOCK], { group: 'g' }) }]);
+
+// ---------- F2: ambiguous v0.9.2 combined records ----------
+const OLD = { 'common:combined': ['binary_sensor.a@2026-11-01T10:00:00Z'] }; // written by card A (watches a)
+const A = { alerts: [{ id: 'common', combine: true, entities: ['binary_sensor.a'] }] };
+const B = (cond) => ({ alerts: [{ id: 'common', combine: true, entities: ['binary_sensor.a', 'binary_sensor.b'], ...(cond ? { conditions: [{ entity: 'input_boolean.x', state: 'on' }] } : {}) }] });
+const legacy = async ([old, first, oldKey]) => {
+  localStorage.setItem(`nsc-${oldKey}:default`, JSON.stringify(oldKey === 'snoozed' ? { 'common:combined': { until: Date.now() + 3600e3, tokens: old['common:combined'] } } : old));
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'off'), 'input_boolean.x': st('input_boolean.x', 'off') });
+  const b = mount(first, hass);
+  const bShown = ids(b).length;
+  return { bShown, oldKept: !!JSON.parse(localStorage.getItem(`nsc-${oldKey}:default`))['common:combined'] };
+};
+test('F2a overlapping card B mounted first does not take card A\'s old dismissal', legacy,
+  (r) => eq(r, { bShown: 1, oldKept: true }), [OLD, B(false), 'dismissed']);
+test('F2b overlapping card B with conditions off does not delete card A\'s old dismissal', legacy,
+  (r) => r.oldKept === true, [OLD, B(true), 'dismissed']);
+test('F2c same for an old snooze', legacy,
+  (r) => eq(r, { bShown: 1, oldKept: true }), [OLD, B(false), 'snoozed']);
+
+// ---------- F3: time format ----------
+test('F3 (docs) one-digit hours are accepted', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on') });
+  const el = mount({ groups: [{ id: 'g', quiet_hours: { start: '0:00', end: '23:59' } }], alerts: [{ id: 'a', group: 'g', entity: 'binary_sensor.a' }] }, hass);
+  return ids(el).length;
+}, (r) => r === 0);
+
+test('F2d an old combined dismissal from 0.9.2 is ignored: the alert shows once more, nothing else is touched', async () => {
+  localStorage.setItem('nsc-dismissed:default', JSON.stringify({ 'w:combined': ['binary_sensor.a@2026-11-01T10:00:00Z'] }));
+  const el = mount({ alerts: [{ id: 'w', combine: true, entities: ['binary_sensor.a'] }] }, makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on') }));
+  return { shown: ids(el).length, kept: Object.keys(JSON.parse(localStorage.getItem('nsc-dismissed:default'))) };
+}, (r) => eq(r, { shown: 1, kept: ['w:combined'] }));
+
+// ---------- 0.9.3: incidents during a request, snooze resets, exact combined IDs, hidden HA notifications, storage ----------
+test('Z1a combined alerts whose entity lists used to share a fingerprint keep separate dismissals', async () => {
+  const hass = makeHass({
+    'binary_sensor.shared': st('binary_sensor.shared', 'on'),
+    'binary_sensor.an': st('binary_sensor.an', 'off'),
+    'binary_sensor.c0': st('binary_sensor.c0', 'off'),
+  });
+  const cfg = (entity) => ({ alerts: [{ id: 'same', combine: true, entities: ['binary_sensor.shared', entity] }] });
+  const a = mount(cfg('binary_sensor.an'), hass);
+  const aId = a._alerts[0].id;
+  a._dismiss(a._alerts[0]);
+  const b = mount(cfg('binary_sensor.c0'), hass);
+  const bId = [...b._model.keys()][0];
+  return { distinct: aId !== bId, shown: ids(b).length };
+}, (r) => eq(r, { distinct: true, shown: 1 }));
+
+test('Z1b Unsnooze all keeps another card\'s snooze whose entity list used to share a fingerprint', async () => {
+  const hass = makeHass({ 'binary_sensor.an': st('binary_sensor.an', 'on'), 'binary_sensor.c0': st('binary_sensor.c0', 'off') });
+  const a = mount({ alerts: [{ id: 'same', combine: true, entity: 'binary_sensor.an' }] }, hass);
+  a._snooze(a._items.get(a._alerts[0].id), a._alerts[0], 0);
+  await tick(300);
+  a.remove();
+  const b = mount({ alerts: [{ id: 'same', combine: true, entity: 'binary_sensor.c0' }] }, hass);
+  b._confirming = 'unsnooze'; b._onUnsnoozeAll();
+  return Object.keys(JSON.parse(localStorage.getItem('nsc-snoozed:default'))).length;
+}, (r) => r === 1);
+
+test('Z2a conditions off and on end a snooze, as they end a dismissal', async () => {
+  const s = { 'binary_sensor.w': st('binary_sensor.w', 'on'), 'input_boolean.arm': st('input_boolean.arm', 'on') };
+  const hass = makeHass(s);
+  const el = mount({ alerts: [{ id: 'w', entity: 'binary_sensor.w', conditions: [{ entity: 'input_boolean.arm', state: 'on' }] }] }, hass);
+  el._snooze(el._items.get('w:binary_sensor.w'), el._alerts[0], 0);
+  await tick(300);
+  el.hass = { ...hass, states: { ...s, 'input_boolean.arm': st('input_boolean.arm', 'off') } };
+  el.hass = { ...hass, states: s };
+  return ids(el);
+}, (r) => eq(r, ['w:binary_sensor.w']));
+
+test('Z2b group conditions off and on end a snooze, also while hidden by show_groups', async () => {
+  const s = { 'binary_sensor.w': st('binary_sensor.w', 'on'), 'input_boolean.arm': st('input_boolean.arm', 'on') };
+  const hass = makeHass(s);
+  const cfg = { groups: [{ id: 'g', conditions: [{ entity: 'input_boolean.arm', state: 'on' }] }, { id: 'other' }], alerts: [{ id: 'w', entity: 'binary_sensor.w', group: 'g' }] };
+  const el = mount(cfg, hass);
+  el._snooze(el._items.get('w:binary_sensor.w'), el._alerts[0], 0);
+  await tick(300);
+  el.setConfig({ ...cfg, show_groups: ['other'] });
+  el.hass = { ...hass, states: { ...s, 'input_boolean.arm': st('input_boolean.arm', 'off') } };
+  el.hass = { ...hass, states: s };
+  el.setConfig(cfg);
+  return ids(el);
+}, (r) => eq(r, ['w:binary_sensor.w']));
+
+test('Z3 conditions off and on while a button runs: the new incident is not dismissed', async () => {
+  let resolve;
+  const s = { 'binary_sensor.w': st('binary_sensor.w', 'on'), 'input_boolean.arm': st('input_boolean.arm', 'on') };
+  const hass = makeHass(s, { callService: () => new Promise((r) => resolve = r) });
+  const el = mount({ alerts: [{ id: 'w', entity: 'binary_sensor.w', conditions: [{ entity: 'input_boolean.arm', state: 'on' }], actions: [{ name: 'Run', dismiss: true, tap_action: { action: 'perform-action', perform_action: 'script.audit' } }] }] }, hass);
+  el.shadowRoot.querySelector('[data-act]').click(); await tick(5);
+  el.hass = { ...hass, states: { ...s, 'input_boolean.arm': st('input_boolean.arm', 'off') } };
+  el.hass = { ...hass, states: s };
+  resolve({}); await tick(10);
+  return ids(el);
+}, (r) => eq(r, ['w:binary_sensor.w']));
+
+test('Z4 a button finishing late does not dismiss a newer HA notification with the same ID', async () => {
+  let resolve;
+  let callback;
+  const hass = makeHass({}, {
+    subscribe: (cb) => { callback = cb; return Promise.resolve(() => {}); },
+    callService: (domain) => domain === 'script' ? new Promise((r) => resolve = r) : Promise.resolve({}),
+  });
+  const el = mount({ persistent_notifications: true, persistent_group: 'g', groups: [{ id: 'g', actions: [{ name: 'Run', dismiss: true, tap_action: { action: 'perform-action', perform_action: 'script.audit' } }] }] }, hass);
+  const send = (time, title) => callback({ type: 'updated', notifications: { reminder: { notification_id: 'reminder', title, message: 'Check this', created_at: time } } });
+  send('2026-11-01T10:00:00Z', 'Old incident');
+  el.shadowRoot.querySelector('[data-act]').click(); await tick(5);
+  send('2026-11-01T11:00:00Z', 'New incident');
+  resolve({}); await tick(10);
+  return { shown: ids(el), dismissed: hass.calls.filter((c) => c.d === 'persistent_notification').length };
+}, (r) => eq(r, { shown: ['pn:reminder'], dismissed: 0 }));
+
+test('Z5 an HA notification hidden by show_groups while its button runs is still dismissed', async () => {
+  let resolve;
+  let callback;
+  const hass = makeHass({}, {
+    subscribe: (cb) => { callback = cb; return Promise.resolve(() => {}); },
+    callService: (domain) => domain === 'script' ? new Promise((r) => resolve = r) : Promise.resolve({}),
+  });
+  const cfg = { persistent_notifications: true, persistent_group: 'g', groups: [{ id: 'g', actions: [{ name: 'Run', dismiss: true, tap_action: { action: 'perform-action', perform_action: 'script.audit' } }] }, { id: 'other' }] };
+  const el = mount(cfg, hass);
+  callback({ type: 'current', notifications: { reminder: { notification_id: 'reminder', title: 'Reminder', message: 'Check this', created_at: '2026-11-01T10:00:00Z' } } });
+  el.shadowRoot.querySelector('[data-act]').click(); await tick(5);
+  el.setConfig({ ...cfg, show_groups: ['other'] });
+  resolve({}); await tick(10);
+  return hass.calls.filter((c) => c.d === 'persistent_notification').length;
+}, (r) => r === 1);
+
+test('Z6a storage blocked: dismissing a second alert keeps the first dismissed', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(window, 'localStorage');
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: {
+    getItem() { throw new DOMException('Blocked', 'SecurityError'); },
+    setItem() { throw new DOMException('Blocked', 'SecurityError'); },
+    removeItem() { throw new DOMException('Blocked', 'SecurityError'); },
+  } });
+  try {
+    const el = mount({ alerts: [{ id: 'a', entity: 'binary_sensor.a' }, { id: 'b', entity: 'binary_sensor.b' }] }, makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'on') }));
+    el._dismiss(el._alerts.find((a) => a.id === 'a:binary_sensor.a'));
+    el._dismiss(el._alerts.find((a) => a.id === 'b:binary_sensor.b'));
+    return ids(el);
+  } finally { Object.defineProperty(window, 'localStorage', descriptor); }
+}, (r) => eq(r, []));
+
+test('Z1c (control) a combined ID lists its entities, in any order, without duplicates', async () => {
+  const hass = makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'on') });
+  const one = mount({ alerts: [{ id: 'w', combine: true, entities: ['binary_sensor.b', 'binary_sensor.a', 'binary_sensor.a'] }] }, hass);
+  const two = mount({ alerts: [{ id: 'w', combine: true, entities: [{ entity: 'binary_sensor.a', name: 'A' }, 'binary_sensor.b'] }] }, hass);
+  return [ids(one)[0], ids(two)[0]];
+}, (r) => eq(r, ['w:combined~binary_sensor.a,binary_sensor.b', 'w:combined~binary_sensor.a,binary_sensor.b']));
+
+test('Z2c (control) quiet hours on and off keep a snooze', async () => {
+  const hass = makeHass({ 'binary_sensor.w': st('binary_sensor.w', 'on') });
+  const el = mount({ groups: [{ id: 'g' }], alerts: [{ id: 'w', group: 'g', entity: 'binary_sensor.w' }] }, hass);
+  el._snooze(el._items.get('w:binary_sensor.w'), el._alerts[0], 0);
+  await tick(300);
+  const g = el._groups.get('g');
+  g.quiet_hours = { start: '00:00', end: '23:59' }; el._refresh();
+  g.quiet_hours = undefined; el._refresh();
+  return { shown: ids(el), snoozed: el._snoozedCount };
+}, (r) => eq(r, { shown: [], snoozed: 1 }));
+
+test('Z3b (control) conditions that stay on: a late answer still dismisses', async () => {
+  let resolve;
+  const s = { 'binary_sensor.w': st('binary_sensor.w', 'on'), 'input_boolean.arm': st('input_boolean.arm', 'on') };
+  const hass = makeHass(s, { callService: () => new Promise((r) => resolve = r) });
+  const el = mount({ alerts: [{ id: 'w', entity: 'binary_sensor.w', conditions: [{ entity: 'input_boolean.arm', state: 'on' }], actions: [{ name: 'Run', dismiss: true, tap_action: { action: 'perform-action', perform_action: 'script.x' } }] }] }, hass);
+  el.shadowRoot.querySelector('[data-act]').click(); await tick(5);
+  el.hass = { ...hass, states: { ...s, 'binary_sensor.other': st('binary_sensor.other', 'on') } };
+  resolve({}); await tick(10);
+  return { shown: ids(el), requests: el._requests.size };
+}, (r) => eq(r, { shown: [], requests: 0 }));
+
+test('Z4b (control) a button finishing late still dismisses the same HA notification', async () => {
+  let resolve, callback;
+  const hass = makeHass({}, {
+    subscribe: (cb) => { callback = cb; return Promise.resolve(() => {}); },
+    callService: (domain) => domain === 'script' ? new Promise((r) => resolve = r) : Promise.resolve({}),
+  });
+  const el = mount({ persistent_notifications: true, persistent_group: 'g', groups: [{ id: 'g', actions: [{ name: 'Run', dismiss: true, tap_action: { action: 'perform-action', perform_action: 'script.x' } }] }] }, hass);
+  callback({ type: 'current', notifications: { reminder: { notification_id: 'reminder', title: 'R', message: 'm', created_at: '2026-11-01T10:00:00Z' } } });
+  el.shadowRoot.querySelector('[data-act]').click(); await tick(5);
+  resolve({}); await tick(10);
+  return { shown: ids(el), dismissed: hass.calls.filter((c) => c.d === 'persistent_notification').map((c) => c.data.notification_id) };
+}, (r) => eq(r, { shown: [], dismissed: ['reminder'] }));
+
+test('Z5b (control) an HA notification hidden by show_groups stays hidden; group conditions still leave it out', async () => {
+  let callback;
+  const s = { 'input_boolean.on': st('input_boolean.on', 'on') };
+  const hass = makeHass(s, { subscribe: (cb) => { callback = cb; return Promise.resolve(() => {}); } });
+  const cfg = { persistent_notifications: true, persistent_group: 'g', show_groups: ['other'], groups: [{ id: 'g', conditions: [{ entity: 'input_boolean.on', state: 'on' }] }, { id: 'other' }] };
+  const el = mount(cfg, hass);
+  callback({ type: 'current', notifications: { n: { notification_id: 'n', title: 'N', created_at: '2026-11-01T10:00:00Z' } } });
+  const hidden = { shown: ids(el), model: el._model.has('pn:n') };
+  el.hass = { ...hass, states: { 'input_boolean.on': st('input_boolean.on', 'off') } };
+  return { hidden, condOff: el._model.has('pn:n') };
+}, (r) => eq(r, { hidden: { shown: [], model: true }, condOff: false }));
+
+test('Z6b storage full: earlier dismissals stay until reload; once saving works again it is saved', async () => {
+  const proto = Object.getPrototypeOf(localStorage);
+  const realSet = proto.setItem;
+  proto.setItem = function (k, v) { if (String(k).startsWith('nsc-dismissed')) throw new DOMException('Full', 'QuotaExceededError'); return realSet.call(this, k, v); };
+  let full;
+  const el = mount({ storage_key: 'z6', alerts: [{ id: 'a', entity: 'binary_sensor.a' }, { id: 'b', entity: 'binary_sensor.b' }, { id: 'c', entity: 'binary_sensor.c' }] },
+    makeHass({ 'binary_sensor.a': st('binary_sensor.a', 'on'), 'binary_sensor.b': st('binary_sensor.b', 'on'), 'binary_sensor.c': st('binary_sensor.c', 'on') }));
+  try {
+    el._dismiss(el._alerts.find((a) => a.id === 'a:binary_sensor.a'));
+    el._dismiss(el._alerts.find((a) => a.id === 'b:binary_sensor.b'));
+    full = ids(el);
+  } finally { proto.setItem = realSet; }
+  el._dismiss(el._alerts.find((a) => a.id === 'c:binary_sensor.c'));
+  return { full, saved: Object.keys(JSON.parse(localStorage.getItem('nsc-dismissed:z6'))).sort() };
+}, (r) => eq(r, { full: ['c:binary_sensor.c'], saved: ['a:binary_sensor.a', 'b:binary_sensor.b', 'c:binary_sensor.c'] }));
+
+// ---------- 0.9.3: HA notifications and group conditions, cards left invisible ----------
+test('Z7a group conditions off and on end an HA notification\'s snooze', async () => {
+  let callback;
+  const s = { 'input_boolean.arm': st('input_boolean.arm', 'on') };
+  const hass = makeHass(s, { subscribe: (cb) => { callback = cb; return Promise.resolve(() => {}); } });
+  const el = mount({ persistent_notifications: true, persistent_group: 'g', groups: [{ id: 'g', conditions: [{ entity: 'input_boolean.arm', state: 'on' }] }] }, hass);
+  callback({ type: 'current', notifications: { n: { notification_id: 'n', title: 'Reminder', created_at: '2026-11-01T10:00:00Z' } } });
+  el._snooze(el._items.get('pn:n'), el._alerts[0], 0); await tick(300);
+  el.hass = { ...hass, states: { 'input_boolean.arm': st('input_boolean.arm', 'off') } };
+  el.hass = { ...hass, states: s };
+  return ids(el);
+}, (r) => eq(r, ['pn:n']));
+
+test('Z7b group conditions off and on while a button runs: the HA notification is not dismissed', async () => {
+  let callback, resolve;
+  const s = { 'input_boolean.arm': st('input_boolean.arm', 'on') };
+  const hass = makeHass(s, {
+    subscribe: (cb) => { callback = cb; return Promise.resolve(() => {}); },
+    callService: (d) => d === 'script' ? new Promise((r) => resolve = r) : Promise.resolve({}),
+  });
+  const el = mount({ persistent_notifications: true, persistent_group: 'g', groups: [{ id: 'g', conditions: [{ entity: 'input_boolean.arm', state: 'on' }], actions: [{ name: 'Run', dismiss: true, tap_action: { action: 'perform-action', perform_action: 'script.audit' } }] }] }, hass);
+  callback({ type: 'current', notifications: { n: { notification_id: 'n', title: 'Reminder', created_at: '2026-11-01T10:00:00Z' } } });
+  el.shadowRoot.querySelector('[data-act]').click(); await tick(5);
+  el.hass = { ...hass, states: { 'input_boolean.arm': st('input_boolean.arm', 'off') } };
+  el.hass = { ...hass, states: s };
+  resolve({}); await tick(10);
+  return { shown: ids(el), dismissCalls: hass.calls.filter((c) => c.d === 'persistent_notification').length };
+}, (r) => eq(r, { shown: ['pn:n'], dismissCalls: 0 }));
+
+test('Z8a an alert that comes back during the X animation is visible and tappable', async () => {
+  const hass = makeHass({ 'binary_sensor.w': st('binary_sensor.w', 'on') });
+  const el = mount({ alerts: [{ id: 'w', entity: 'binary_sensor.w' }] }, hass);
+  el.shadowRoot.querySelector('[data-close]').click(); await tick(20);
+  el.hass = { ...hass, states: { 'binary_sensor.w': st('binary_sensor.w', 'on', {}, '2026-11-01T11:00:00Z') } };
+  await tick(300);
+  const item = el._items.get('w:binary_sensor.w');
+  return { shown: ids(el), restored: !!item && item.style.opacity !== '0' && item.style.pointerEvents !== 'none' && ['', '0px'].includes(item.style.getPropertyValue('--x')) };
+}, (r) => eq(r, { shown: ['w:binary_sensor.w'], restored: true }));
+
+test('Z8b a snooze that ends during its animation leaves the alert visible and tappable', async () => {
+  const s = { 'binary_sensor.w': st('binary_sensor.w', 'on'), 'binary_sensor.rain': st('binary_sensor.rain', 'off') };
+  const hass = makeHass(s);
+  const el = mount({ alerts: [{ id: 'w', entity: 'binary_sensor.w' }], snooze_options: [{ label: 'Unless rain', until_conditions: [{ entity: 'binary_sensor.rain', state: 'on' }] }] }, hass);
+  el._snooze(el._items.get('w:binary_sensor.w'), el._alerts[0], 0); await tick(20);
+  el.hass = { ...hass, states: { ...s, 'binary_sensor.rain': st('binary_sensor.rain', 'on') } };
+  await tick(300);
+  const item = el._items.get('w:binary_sensor.w');
+  return { shown: ids(el), snoozed: el._snoozedCount, restored: !!item && item.style.opacity !== '0' && item.style.pointerEvents !== 'none' };
+}, (r) => eq(r, { shown: ['w:binary_sensor.w'], snoozed: 0, restored: true }));
+
+test('Z8c (control) an ordinary X still removes the card', async () => {
+  const hass = makeHass({ 'binary_sensor.w': st('binary_sensor.w', 'on') });
+  const el = mount({ alerts: [{ id: 'w', entity: 'binary_sensor.w' }] }, hass);
+  el.shadowRoot.querySelector('[data-close]').click(); await tick(300);
+  return { shown: ids(el), tracked: el._items.has('w:binary_sensor.w') };
+}, (r) => eq(r, { shown: [], tracked: false }));
 
 (async () => {
   const { browser, page, errors } = await open(SRC);
