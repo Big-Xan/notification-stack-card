@@ -659,3 +659,7 @@ auto_collapse: 30
 Built and maintained by [Big-Xan](https://github.com/Big-Xan), with development help from Claude Opus (Anthropic). Claude also helped move the project over from an earlier private repository: the version-by-version commits from v0.2.0 to v0.6.3 were carried across on the day this repo went public, which is why they share a date.
 
 If you like this card, you might also like [Adaptive Plant](https://github.com/Big-Xan/adaptive_plant), a plant-care integration for Home Assistant.
+
+If this card makes your dashboard better, you can support its development on Ko-fi. It's entirely optional; the card stays free.
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/bigxan)
