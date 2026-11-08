@@ -11,7 +11,10 @@ A lightweight, stacked, tap-to-expand notification card for Home Assistant. Aler
 
 One self-contained JavaScript file. No dependencies. Includes a visual editor.
 
-<img width="3072" height="2048" alt="notification-stack-card-header" src="https://github.com/user-attachments/assets/701483b6-ee74-4904-9fc2-a38779eb8efd" />
+<img width="3072" height="2048" alt="notification-stack-card-header-phone" src="https://github.com/user-attachments/assets/58b2f5c3-d152-49b5-84f3-a2f2dd8f5198" />
+<img width="3072" height="2048" alt="desktop-and-tablet-notification-stack-card-2" src="https://github.com/user-attachments/assets/d5d5a412-0e00-4647-ad41-cc7a6d90b7e7" />
+
+
 
 
 ## Features
