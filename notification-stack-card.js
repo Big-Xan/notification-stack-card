@@ -1,5 +1,5 @@
 /*
- * notification-stack-card.js  v0.9.3
+ * notification-stack-card.js  v0.9.4
  * A lightweight, stacked, tap-to-expand notification card for Home Assistant, with a visual editor.
  *
  * Alerts come from rules (entity states) and, optionally, Home Assistant's persistent
@@ -12,9 +12,12 @@
  * joins a combined alert, or the alert's conditions turn off and on again. Quiet hours and
  * zones only hide alerts, so they keep a dismissal. Persistent notifications are dismissed
  * in Home Assistant.
+ *
+ * Titles and messages may be Home Assistant (Jinja) templates; Home Assistant renders them and sends
+ * updates while the alert is showing.
  */
 
-const NSC_VERSION = '0.9.3';
+const NSC_VERSION = '0.9.4';
 const CARD_TYPE = 'custom:notification-stack-card';
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
@@ -28,6 +31,13 @@ const EMPTY_MODES = ['hide', 'reserve', 'show'];
 const COUNT_POSITIONS = ['right', 'left', 'hidden'];
 const SNOOZED_POSITIONS = ['buttons', 'before_title', 'after_title', 'hidden'];
 const SCROLL_DIRECTIONS = ['vertical', 'horizontal'];
+const KEEP_EXPANDED = ['never', 'always', 'wide'];
+const LAYOUTS = ['vertical', 'horizontal'];
+const EXPAND_TO = ['right', 'left'];
+/** YAML may turn `keep_expanded: true/false` into booleans; they mean always/never. */
+const keepExpandedOf = (v) => (v === true ? 'always' : v === false ? 'never' : oneOf(v, KEEP_EXPANDED, 'never'));
+/** Text Home Assistant should render as a template (Jinja): it has {{ }}, {% %} or {# #}. */
+const isJinja = (s) => typeof s === 'string' && /\{\{|\{%|\{#/.test(s);
 const reducedMotion = () => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
 const DEFAULT_SNOOZE = [
@@ -35,6 +45,9 @@ const DEFAULT_SNOOZE = [
   { label: '30 minutes', minutes: 30 },
   { label: 'Until tomorrow', until: 'tomorrow' },
 ];
+
+// The narrowest a notification gets side by side (`item_width`): room for the icon, the snooze button and the X.
+const MIN_COL = 160;
 
 const DEFAULTS = {
   title: '',
@@ -59,6 +72,11 @@ const DEFAULTS = {
   message_overflow: 'truncate',
   scroll_direction: 'vertical',
   auto_collapse: 0,
+  keep_expanded: 'never',
+  keep_expanded_width: 800,
+  layout: 'vertical',
+  item_width: 300,
+  expand_to: 'right',
   sort: 'severity',
   show_time: true,
   group_label: 'name',
@@ -91,6 +109,8 @@ const DEFAULTS = {
 const toList = (v) => (v === undefined || v === null || v === '' ? [] : Array.isArray(v) ? v : [v]);
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+// The same items, in any order (alert tokens).
+const sameSet = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((t) => b.includes(t));
 const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const isBlank = (v) =>
   v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length) || (isObj(v) && !Object.keys(v).length);
@@ -267,10 +287,13 @@ function writeStore(key, obj) {
 /**
  * Cards can share a key, so a card writes only the records it changed onto what's stored now, never its whole
  * copy. Returns the merged records. Other cards on the page are told afterwards (not mid-update).
+ * `based` (id -> JSON of the record a decision was based on) makes a change conditional: a record another card
+ * replaced meanwhile is kept, and the card judges that one next time instead.
  */
-function mergeStore(key, mine, ids, src) {
+function mergeStore(key, mine, ids, src, based) {
   const obj = readStore(key);
   ids.forEach((id) => {
+    if (based && id in based && JSON.stringify(obj[id]) !== based[id]) return;
     if (mine[id] === undefined) delete obj[id];
     else obj[id] = mine[id];
   });
@@ -395,16 +418,19 @@ const STYLE = `
 .wrap { display: flex; flex-direction: column; gap: 8px; max-width: 100%; box-sizing: border-box; isolation: isolate; }
 
 .header {
-  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
   column-gap: 8px; min-height: 28px;
 }
+/* The buttons keep their width; a long title shortens with … instead of running under them. */
+.header.al-center { grid-template-columns: minmax(0, 1fr) minmax(0, max-content) minmax(max-content, 1fr); }
+.header.al-right { grid-template-columns: auto minmax(0, 1fr); }
 .header[hidden], .footer[hidden] { display: none; }
 .htitle, .hbtns { grid-row: 1; min-width: 0; }
-.al-left .htitle { grid-column: 1 / 3; justify-self: start; }
-.al-left .hbtns { grid-column: 3; justify-self: end; }
-.al-center .htitle { grid-column: 2; justify-self: center; }
+.al-left .htitle { grid-column: 1; justify-self: start; max-width: 100%; }
+.al-left .hbtns { grid-column: 2; justify-self: end; }
+.al-center .htitle { grid-column: 2; justify-self: center; max-width: 100%; }
 .al-center .hbtns { grid-column: 3; justify-self: end; }
-.al-right .htitle { grid-column: 2 / 4; justify-self: end; }
+.al-right .htitle { grid-column: 2; justify-self: end; max-width: 100%; }
 .al-right .hbtns { grid-column: 1; justify-self: start; }
 .htitle {
   display: flex; align-items: center; gap: 8px;
@@ -432,6 +458,13 @@ const STYLE = `
 
 .scroller.scroll { overflow-y: auto; overscroll-behavior: contain; padding: 2px 2px 6px; margin: -2px -2px 0; }
 .stack { position: relative; transition: height var(--nsc-duration) var(--nsc-ease); }
+/* Side by side: the row scrolls sideways; a notification is swiped up or down to dismiss it. */
+.scroller.hscroll { overflow-x: auto; overscroll-behavior-x: contain; padding: 2px 2px 6px; margin: -2px -2px 0; scrollbar-width: thin; }
+/* The row is laid out and scrolled left to right (right is always right); the notifications keep the dashboard's direction. */
+.scroller.hscroll { direction: ltr; }
+.stack.side .item { touch-action: pan-x; }
+/* Nothing to swipe away (it can't be dismissed, or a max height makes up and down scroll the list): both directions scroll. */
+.stack.side .item.fixed, .stack.side.noswipe .item { touch-action: pan-x pan-y; }
 
 .item {
   --nsc-accent: var(--nsc-info);
@@ -439,7 +472,8 @@ const STYLE = `
   --nsc-tint: color-mix(in srgb, var(--nsc-accent) var(--nsc-tint-amount), transparent);
   position: absolute; top: 0; left: 0; right: 0;
   box-sizing: border-box; overflow: hidden;
-  transform: translate3d(var(--x, 0px), var(--y, 0px), 0) scale(var(--s, 1));
+  /* --px/--y: place in the layout; --x/--dy: swipe and slide-out. */
+  transform: translate3d(calc(var(--px, 0px) + var(--x, 0px)), calc(var(--y, 0px) + var(--dy, 0px)), 0) scale(var(--s, 1));
   transform-origin: 50% 100%;
   transition:
     transform var(--nsc-duration) var(--nsc-ease),
@@ -495,6 +529,7 @@ const STYLE = `
   white-space: pre-line; word-break: break-word;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--nsc-lines, 2); overflow: hidden;
 }
+.msg[hidden] { display: none !important; }
 .msg.scrolling { display: block; -webkit-line-clamp: unset; max-height: calc(var(--nsc-lines, 2) * 1.35em); }
 .msg.scrolling .mi { display: block; animation: nsc-scroll var(--nsc-scroll-dur, 8s) ease-in-out infinite alternate; }
 .item.full .msg { display: block; -webkit-line-clamp: unset; max-height: none; }
@@ -551,7 +586,7 @@ const STYLE = `
   --nsc-accent: var(--nsc-info);
   position: absolute; top: 0; left: 0; right: 0; box-sizing: border-box;
   display: flex; align-items: center; gap: 8px; padding: 0 4px; min-height: 28px;
-  transform: translate3d(0, var(--y, 0px), 0);
+  transform: translate3d(var(--px, 0px), var(--y, 0px), 0);
   transition: transform var(--nsc-duration) var(--nsc-ease), opacity 250ms ease;
 }
 .gh.off { opacity: 0; pointer-events: none; }
@@ -587,13 +622,16 @@ class NotificationStackCard extends HTMLElement {
     this._pnSub = null;
     this._pnFailed = false;
     this._busy = new Map(); // "alertId:button" -> token of the request in flight
-    this._requests = new Set(); // {id, ended} per request in flight that dismisses when it succeeds
+    this._requests = new Set(); // {id, ended} per pending dismissal: a button's request, or an X or swipe sliding out
+    this._parked = new Set(); // late dismissals that met a changed record off the page: settled on the next hass
+    this._fresh = false; // states came from a hass received since the card last left the page
     this._failed = null; // "alertId:button" that just failed, shown briefly
     this._sig = '';
     this._snoozedCount = 0;
     this._drag = null;
     this._suppressClick = false;
     this._lastW = 0;
+    this._jinja = new Map(); // template + variables -> {unsub, result, error}, while an alert uses it
     this._onOutside = (ev) => {
       if (!ev.composedPath().includes(this)) this._minimize();
     };
@@ -602,6 +640,9 @@ class NotificationStackCard extends HTMLElement {
     this._onStore = (ev) => {
       const key = ev.type === 'storage' ? ev.key : ev.detail?.key;
       if (ev.detail?.src === this || !this._keys || (key !== this._keys.dismissed && key !== this._keys.snoozed)) return;
+      // Another tab may have newer states than this one (a background tab's connection can be suspended): its records
+      // hide their alerts now, and are judged on this tab's next hass.
+      if (ev.type === 'storage') this._fresh = false;
       this._dismissed = readStore(this._keys.dismissed);
       this._snoozed = readStore(this._keys.snoozed);
       this._refresh();
@@ -640,13 +681,17 @@ class NotificationStackCard extends HTMLElement {
     );
     cfg.count_position = oneOf(config.count_position, COUNT_POSITIONS, 'right');
     cfg.scroll_direction = oneOf(config.scroll_direction, SCROLL_DIRECTIONS, 'vertical');
+    cfg.keep_expanded = keepExpandedOf(config.keep_expanded);
+    cfg.layout = oneOf(config.layout, LAYOUTS, 'vertical');
+    cfg.expand_to = oneOf(config.expand_to, EXPAND_TO, 'right');
     this._config = cfg;
 
     const key = cfg.storage_key || 'default';
     // Remembered height is per layout, so two copies of the card with different layouts don't overwrite each other.
     const layout = ['collapsed_height', 'max_peek', 'peek_offset', 'compact', 'message_lines', 'title_font_size',
       'message_font_size', 'group_label', 'card_style', 'width', 'show_time'].map((k) => String(cfg[k] ?? '')).join('|') +
-      (cfg.message_overflow === 'scroll' && cfg.scroll_direction === 'horizontal' ? '|h' : '');
+      (cfg.message_overflow === 'scroll' && cfg.scroll_direction === 'horizontal' ? '|h' : '') +
+      (cfg.layout === 'horizontal' ? `|side:${cfg.expand_to}` : '');
     let hash = 0;
     for (const ch of layout) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
     const layoutId = (hash >>> 0).toString(36);
@@ -695,9 +740,22 @@ class NotificationStackCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    // Every hass Home Assistant sends is current, so the card can judge dismiss/snooze memory again. Off the page
+    // (a card that hid itself still gets hass) it hears no store events, so it rereads the memory first.
+    this._fresh = true;
+    if (!this.isConnected && this._keys) {
+      this._dismissed = readStore(this._keys.dismissed);
+      this._snoozed = readStore(this._keys.snoozed);
+    }
     this._maybeSubscribe();
     if (!this._tplRequested) this._loadTemplates();
-    this._update();
+    this._inHass = true;
+    try {
+      this._update();
+      if (this._parked.size) this._settleParked();
+    } finally {
+      this._inHass = false;
+    }
   }
 
   get hass() {
@@ -711,6 +769,15 @@ class NotificationStackCard extends HTMLElement {
     window.addEventListener('nsc-store', this._onStore);
     window.addEventListener('storage', this._onStore);
     if (!this._timer) this._timer = setInterval(() => this._refresh(), 60000);
+    // Off the page it didn't hear about other cards' dismissals and snoozes, so it catches up first.
+    if (this._keys) {
+      this._dismissed = readStore(this._keys.dismissed);
+      this._snoozed = readStore(this._keys.snoozed);
+    }
+    // Back on the page (a view or pop-up opened again): templates subscribe again and the text catches up.
+    // Unless it got hass while away, its states are the ones from when it left: until the next hass it only
+    // reads dismiss/snooze memory, since a newer record from another card would look ended to it.
+    if (this._hass && this._config) this._refresh();
     if (this._stack) requestAnimationFrame(() => this._layout());
   }
 
@@ -719,11 +786,27 @@ class NotificationStackCard extends HTMLElement {
     clearInterval(this._timer);
     this._timer = null;
     [this._acTimer, this._confirmTimer, this._wakeTimer, this._failTimer].forEach(clearTimeout);
+    this._fresh = false;
     this._failed = null;
     TemplateStore.listeners.delete(this._tplListener);
     window.removeEventListener('nsc-store', this._onStore);
     window.removeEventListener('storage', this._onStore);
-    this._unsubscribePN();
+    // A card that hid itself keeps listening for persistent notifications (Home Assistant takes it off the page).
+    if (!this.hidden) this._unsubscribePN();
+    // Templates stop while the card is off the page. Their last text stays until Home Assistant answers again.
+    // Text is remembered per alert, with the tokens of the incident it was rendered for. A subscription that hasn't
+    // answered yet (the card was put back a moment ago) keeps the text remembered before.
+    const last = new Map();
+    this._jinjaUses?.forEach((u, rk) => {
+      const j = this._jinja.get(u.key);
+      const live = j && j.result !== undefined && !j.error;
+      const rem = live ? j.seen?.has(rk) && { key: u.key, text: j.result, tokens: j.seen.get(rk) } : this._jinjaLast?.get(rk);
+      if (rem) last.set(rk, rem);
+    });
+    this._jinjaLast = last;
+    this._dropJinja(new Set());
+    // A card that hid itself is taken off the page: a snooze running out still brings it back.
+    if (this.hidden) this._scheduleWake();
   }
 
   _refresh() {
@@ -789,7 +872,8 @@ class NotificationStackCard extends HTMLElement {
 
   _maybeSubscribe() {
     if (!this._config?.persistent_notifications || !this._hass?.connection) return;
-    if (this._pnSub || this._pnFailed || !this.isConnected) return;
+    // A card that hid itself is off the page but still listens, so a new notification can bring it back.
+    if (this._pnSub || this._pnFailed || (!this.isConnected && !this.hidden)) return;
     this._pnSub = this._hass.connection.subscribeMessage((msg) => this._onPN(msg), {
       type: 'persistent_notification/subscribe',
     });
@@ -812,6 +896,11 @@ class NotificationStackCard extends HTMLElement {
     if (msg?.type === 'current') this._pn = { ...n };
     else if (msg?.type === 'removed') Object.keys(n).forEach((id) => delete this._pn[id]);
     else this._pn = { ...this._pn, ...n };
+    // Off the page (a card that hid itself) it hears no store events, so it rereads the memory first, as on hass.
+    if (!this.isConnected && this._keys) {
+      this._dismissed = readStore(this._keys.dismissed);
+      this._snoozed = readStore(this._keys.snoozed);
+    }
     this._refresh();
   }
 
@@ -945,6 +1034,93 @@ class NotificationStackCard extends HTMLElement {
     });
   }
 
+  /**
+   * A title or message that is a Home Assistant template. Home Assistant renders it and sends a new result
+   * whenever it changes, for as long as an alert uses it. The template gets `entity`, `entities`, `name`,
+   * `names` and `count`. Until the first result it shows `fallback`; if it can't be rendered, the text as written.
+   */
+  _jinjaText(tpl, ctx, fallback) {
+    const variables = { entity: ctx.entity, entities: ctx.entities, name: ctx.name, names: ctx.names, count: ctx.count };
+    const key = JSON.stringify([tpl, variables]);
+    // Per alert as well: two alerts can share one template (and one subscription) but not remembered text.
+    const rk = `${ctx.id}\u0001${key}`;
+    this._jinjaUsed?.add(key);
+    this._jinjaUses?.set(rk, { key, tokens: ctx.tokens });
+    // Text remembered from before a reattach shows only for the same incident; a new one waits for Home Assistant.
+    const rem = this._jinjaLast?.get(rk);
+    const last = rem && sameSet(rem.tokens, ctx.tokens) ? rem.text : fallback;
+    // Only a card on the page subscribes; one that was removed would never unsubscribe.
+    const j = this._jinja.get(key) || (this.isConnected ? this._subscribeJinja(key, tpl, variables) : null);
+    if (!j) return last;
+    if (j.error) return tpl;
+    return j.result ?? last;
+  }
+
+  /** Remembered text for a template is forgotten once Home Assistant answers it again. */
+  _forgetJinja(key) {
+    this._jinjaLast?.forEach((v, rk) => v.key === key && this._jinjaLast.delete(rk));
+  }
+
+  _subscribeJinja(key, template, variables) {
+    const j = { result: undefined, error: '', unsub: null, dropped: false };
+    this._jinja.set(key, j);
+    const fail = (message) => {
+      if (j.dropped) return;
+      j.error = message;
+      this._forgetJinja(key);
+      console.warn(`notification-stack-card: template couldn't be rendered (${message}): ${template}`);
+      this._refresh();
+    };
+    const conn = this._hass?.connection;
+    if (!conn?.subscribeMessage) {
+      j.error = 'no connection';
+      return j;
+    }
+    const onMessage = (msg) => {
+      if (j.dropped || !msg) return;
+      if ('result' in msg) {
+        const r = msg.result;
+        j.result = typeof r === 'string' ? r : r === null || r === undefined ? '' : typeof r === 'object' ? JSON.stringify(r) : String(r);
+        j.error = '';
+        // The incident each alert using it had when this result arrived: only those remember it.
+        j.seen = new Map();
+        this._jinjaUses?.forEach((u, rk) => u.key === key && j.seen.set(rk, u.tokens));
+        this._forgetJinja(key);
+        this._refresh();
+      } else if (msg.error) {
+        if (msg.level === 'ERROR') fail(msg.error);
+        else console.warn(`notification-stack-card: template warning (${msg.error}): ${template}`);
+      }
+    };
+    let sub;
+    try {
+      sub = conn.subscribeMessage(onMessage, { type: 'render_template', template, variables, report_errors: true });
+    } catch (e) {
+      sub = Promise.reject(e);
+    }
+    Promise.resolve(sub)
+      .then((unsub) => {
+        if (j.dropped) Promise.resolve(unsub?.()).catch(() => {});
+        else j.unsub = unsub;
+      })
+      .catch((e) => fail(String(e?.message || e?.code || e)));
+    return j;
+  }
+
+  /** Stop the templates not in `keep`. */
+  _dropJinja(keep) {
+    for (const [key, j] of this._jinja) {
+      if (keep.has(key)) continue;
+      j.dropped = true;
+      try {
+        Promise.resolve(j.unsub?.()).catch(() => {});
+      } catch (_) {
+        /* already closed */
+      }
+      this._jinja.delete(key);
+    }
+  }
+
   /** Settings a rule inherits from its group (rule values win). */
   _inherit(rule, g) {
     const severity = validSeverity(rule.severity) || validSeverity(g?.severity) || 'info';
@@ -973,6 +1149,8 @@ class NotificationStackCard extends HTMLElement {
     const listed = (g) => !filter.length || (g ? filter.includes(g.id) : cfg.show_ungrouped !== false);
     const groupOk = (g) => !g?.conditions || this._conditionsPass(g.conditions);
     const out = [];
+    this._jinjaUsed = new Set();
+    this._jinjaUses = new Map(); // alert + template -> {key, tokens}, for remembered text
     // Every alert ID this card's rules can produce. A dismissal ends only for one of these, so a card never
     // ends another card's dismissals on a shared storage_key.
     const checked = new Set();
@@ -1007,19 +1185,31 @@ class NotificationStackCard extends HTMLElement {
         const lead = list[0];
         const multi = list.length > 1;
         const names = joinNames(list.map((h) => h.name));
-        const ctx = { so: lead.so, name: multi ? names : lead.name, names, count: list.length };
+        const tokens = list.map((h) => `${h.ent.entity}@${h.so.last_changed}`);
+        const ctx = {
+          id,
+          tokens,
+          so: lead.so,
+          name: multi ? names : lead.name,
+          names,
+          count: list.length,
+          entity: lead.ent.entity,
+          entities: list.map((h) => h.ent.entity),
+        };
         const tTpl = (multi && rule.combined_title) || rule.title || '{name}';
         const mTpl = multi && rule.combined_message !== undefined ? rule.combined_message : rule.message ?? '{state}';
+        // Jinja text is rendered by Home Assistant; until the first answer the title shows the name.
+        const text = (tpl, fallback) => (isJinja(tpl) ? this._jinjaText(tpl, ctx, fallback) : this._fill(tpl, ctx));
         return {
           ...base,
           id,
           kind: 'entity',
           entity: lead.ent.entity,
           icon: lead.ent.icon || base.icon || lead.so.attributes.icon || DEFAULT_ICONS[base.severity],
-          title: this._fill(tTpl, ctx),
-          message: this._fill(mTpl, ctx),
+          title: text(tTpl, ctx.name),
+          message: text(mTpl, ''),
           ts: lead.so.last_changed,
-          tokens: list.map((h) => `${h.ent.entity}@${h.so.last_changed}`),
+          tokens,
           hidden,
         };
       };
@@ -1075,19 +1265,39 @@ class NotificationStackCard extends HTMLElement {
     const covered = (seen, a) => Array.isArray(seen) && a.tokens.every((t) => seen.includes(t));
     // A dismissal ends when its alert comes with something new, or this card's rule for it was checked and
     // nothing matched. Records this card can't produce belong to another card (or a removed alert) and are left.
-    const ended = (seen, id, a) => (a ? !covered(seen, a) : checked.has(id));
+    // Until a hass arrives after the card comes back on the page, its states are the ones from when it left: nothing
+    // ends on what it sees then, and the records still hide their alerts. A card fed while off the page (one that hid
+    // itself) is up to date. A record is ended or changed only if it's still the one stored (see mergeStore).
+    // Off the page, only the hass just received counts: a wake or another update there may run on states from
+    // before the card's view was hidden (a card that hid itself stops getting hass when its view is left). It stays
+    // that way until the next hass, even once it's back on the page.
+    if (!this.isConnected && !this._inHass) this._fresh = false;
+    const stale = !this._fresh;
+    // A Home Assistant notification's own token comes from its subscription, not from hass, so it's always current:
+    // one sent again with the same ID (a new created_at) ends its snooze at once, even on a card that isn't current.
+    const ended = (seen, id, a) => (a ? (!stale || a.kind === 'pn') && !covered(seen, a) : !stale && checked.has(id));
     const dIds = [];
     const sIds = [];
+    const dBased = {};
+    const sBased = {};
     this._checked = checked;
     // An alert whose rule was checked and didn't match has ended: a request started before then doesn't dismiss
     // what comes next (conditions off and on make a new incident without the entity changing).
     this._requests.forEach((q) => checked.has(q.id) && !active.has(q.id) && (q.ended = true));
     // Every alert as defined now, including hidden, dismissed and snoozed ones (see _onActionButton).
     this._model = active;
+    // A dismissal waiting for fresh states stops hiding its alert once it can't apply (another storage_key, an alert
+    // edited to be non-dismissible or ended); it would be dropped on the next hass anyway.
+    this._parked.forEach((p) => {
+      if (p.ok()) return;
+      this._parked.delete(p);
+      this._requests.delete(p.request);
+    });
     // Combined alerts remembered by 0.9.2 and earlier ("id:combined") aren't carried over: those records don't
     // say which card or entities they belonged to, so they're ignored and the alert shows once more.
     for (const id of Object.keys(this._dismissed)) {
       if (ended(this._dismissed[id], id, active.get(id))) {
+        dBased[id] = JSON.stringify(this._dismissed[id]);
         delete this._dismissed[id];
         dIds.push(id);
       }
@@ -1095,8 +1305,9 @@ class NotificationStackCard extends HTMLElement {
     for (const id of Object.keys(this._snoozed)) {
       const s = this._snoozed[id];
       const a = active.get(id);
+      sBased[id] = JSON.stringify(s);
       // Arrival/conditions snoozes arm once the event isn't happening, then end when it happens.
-      const met = s ? this._snoozeEventMet(s) : null;
+      const met = s && !stale ? this._snoozeEventMet(s) : null;
       if (met === false && !s.armed) {
         s.armed = true;
         sIds.push(id);
@@ -1107,13 +1318,14 @@ class NotificationStackCard extends HTMLElement {
         sIds.push(id);
       }
     }
-    if (dIds.length) this._dismissed = mergeStore(this._keys.dismissed, this._dismissed, dIds, this);
-    if (sIds.length) this._snoozed = mergeStore(this._keys.snoozed, this._snoozed, sIds, this);
+    if (dIds.length) this._dismissed = mergeStore(this._keys.dismissed, this._dismissed, dIds, this, dBased);
+    if (sIds.length) this._snoozed = mergeStore(this._keys.snoozed, this._snoozed, sIds, this, sBased);
 
     let snoozed = 0;
     const visible = out.filter((a) => {
       if (a.hidden) return false;
       if (this._dismissed[a.id]) return false;
+      if (this._parked.size && [...this._parked].some((p) => p.alert.id === a.id)) return false;
       if (this._snoozed[a.id]) {
         snoozed += 1;
         return false;
@@ -1122,6 +1334,15 @@ class NotificationStackCard extends HTMLElement {
     });
     this._snoozedCount = snoozed;
     this._scheduleWake();
+    // Templates no alert uses any more stop updating, and their remembered text is forgotten: when the alert comes
+    // back, it waits for Home Assistant like the first time.
+    this._dropJinja(this._jinjaUsed);
+    this._jinjaLast?.forEach((_, rk) => {
+      if (!this._jinjaUses.has(rk)) this._jinjaLast.delete(rk);
+    });
+    // An alert that stopped using a template (conditions off) no longer counts as having seen its result, even
+    // while another alert keeps the subscription: when it comes back, it waits for Home Assistant.
+    this._jinja.forEach((j) => j.seen?.forEach((_, rk) => this._jinjaUses.has(rk) || j.seen.delete(rk)));
 
     visible.sort((a, b) => {
       if (cfg.sort !== 'time') {
@@ -1159,6 +1380,9 @@ class NotificationStackCard extends HTMLElement {
 
   _scheduleWake() {
     clearTimeout(this._wakeTimer);
+    // Off the page it waits until the card is back, unless it hid itself: a snooze running out should bring it back
+    // on time. Off the page that wake only ends snoozes whose time is up (see `stale` in _computeAlerts).
+    if (!this.isConnected && !this.hidden) return;
     const ends = Object.values(this._snoozed).map((s) => s.until).filter(Number.isFinite);
     if (!ends.length) return;
     const wait = Math.min(Math.max(500, Math.min(...ends) - Date.now() + 500), 2147483000);
@@ -1256,16 +1480,53 @@ class NotificationStackCard extends HTMLElement {
     this._stack.addEventListener('pointerup', (ev) => this._onPointerUp(ev, false));
     this._stack.addEventListener('pointercancel', (ev) => this._onPointerUp(ev, true));
 
+    // Side by side, a vertical wheel scrolls the row (unless the list also scrolls up and down).
+    this._scroller.addEventListener(
+      'wheel',
+      (ev) => {
+        const s = this._scroller;
+        if (!s.classList.contains('hscroll') || ev.ctrlKey || Math.abs(ev.deltaY) <= Math.abs(ev.deltaX)) return;
+        if (s.scrollHeight > s.clientHeight + 1) return;
+        const max = s.scrollWidth - s.clientWidth;
+        const next = Math.max(0, Math.min(max, s.scrollLeft + ev.deltaY));
+        if (max <= 0 || next === s.scrollLeft) return; // at either end the page scrolls instead
+        s.scrollLeft = next;
+        ev.preventDefault();
+      },
+      { passive: false }
+    );
+
+    // The left-opening row starts scrolled to its end again in the new scroller.
+    this._leftRow = false;
+    this._fromRight = 0;
+    // Remember how far the user scrolled from the right end of a left-opening row.
+    this._scroller.addEventListener(
+      'scroll',
+      () => {
+        if (this._leftRow) this._fromRight = Math.max(0, this._rowEnd() - this._scroller.clientWidth - this._scroller.scrollLeft);
+      },
+      { passive: true }
+    );
     if (this._ro) this._ro.disconnect();
     if (window.ResizeObserver) {
+      // `keep_expanded: wide` follows the card's outer width (.wrap), which a scrollbar inside the list can't change,
+      // so it can't flip back and forth at the breakpoint. The layout follows the scroller, the width notifications fill
+      // (the stack can be wider when side by side). A zero width (hidden or removed) keeps the last one.
       this._ro = new ResizeObserver((entries) => {
-        const w = entries[0]?.contentRect?.width || 0;
-        if (w !== this._lastW) {
-          this._lastW = w;
-          if (w) this._layout();
+        let layout = false;
+        for (const e of entries) {
+          const w = e.contentRect?.width || 0;
+          const outer = e.target === this._wrap;
+          if (!w || w === (outer ? this._lastW : this._lastSW)) continue;
+          if (outer) this._lastW = w;
+          else this._lastSW = w;
+          layout = true;
+          if (outer && this._keepExpanded(w) !== !!this._kept) this._refresh();
         }
+        if (layout) this._layout();
       });
-      this._ro.observe(this._stack);
+      this._ro.observe(this._wrap);
+      this._ro.observe(this._scroller);
     }
   }
 
@@ -1276,6 +1537,16 @@ class NotificationStackCard extends HTMLElement {
     // attribute changes no text or time), so dismiss and snooze always use the latest tokens.
     this._alerts = alerts;
     this._blocks = this._makeBlocks(alerts);
+    // Keep expanded: the list stays open whenever there's more than one alert. When it stops applying (the
+    // card got narrower), it folds back.
+    const keep = this._keepExpanded();
+    if (keep && alerts.length > 1) this._expanded = true;
+    else if (this._kept && !keep) {
+      this._expanded = false;
+      this._openGroups.clear();
+      this._items.forEach((el) => el.classList.remove('full'));
+    }
+    this._kept = keep;
     const sig =
       alerts.map((a) => `${a.id}|${a.ts}|${a.severity}|${a.icon}|${a.color}|${a.bg}|${a.fg}|${a.title}|${a.message}`).join('§') +
       `#${this._expanded}#${[...this._openGroups].join(',')}#${this._confirming || ''}#${this._snoozeOpen || ''}#${this._snoozedCount}` +
@@ -1307,7 +1578,12 @@ class NotificationStackCard extends HTMLElement {
     const chip = cfg.snoozed_position !== 'hidden' && this._snoozedCount > 0;
     const empty = n === 0 && !chip;
     const preview = !!this.preview;
-    this.hidden = empty && cfg.when_empty === 'hide' && !preview;
+    const hide = empty && cfg.when_empty === 'hide' && !preview;
+    if (this.hidden !== hide) {
+      this.hidden = hide;
+      // Home Assistant checks this when it sends hass; for a change on its own (a snooze ending), tell it.
+      if (!this._inHass) this._fire('card-visibility-changed', { value: !hide });
+    }
     this._wrap.style.visibility = empty && cfg.when_empty === 'reserve' && !preview ? 'hidden' : '';
 
     // Header and footer
@@ -1320,7 +1596,7 @@ class NotificationStackCard extends HTMLElement {
     this._snzcBtn.classList.toggle('confirm', this._confirming === 'unsnooze');
     this._snzcBtn.querySelector('span').textContent =
       this._confirming === 'unsnooze' ? 'Unsnooze all?' : String(this._snoozedCount);
-    this._lessBtn.hidden = !this._expanded;
+    this._lessBtn.hidden = !this._expanded || this._kept;
     this._clearBtn.hidden = !(this._expanded && alerts.some((a) => a.dismissible));
     this._clearBtn.textContent = this._confirming === 'clear' ? 'Clear all?' : 'Clear';
     this._clearBtn.classList.toggle('confirm', this._confirming === 'clear');
@@ -1349,6 +1625,7 @@ class NotificationStackCard extends HTMLElement {
       }
       el.classList.remove('sev-critical', 'sev-warning', 'sev-info');
       el.classList.add(`sev-${a.severity}`);
+      el.classList.toggle('fixed', !a.dismissible);
       if (a.color) el.style.setProperty('--nsc-accent', a.color);
       else el.style.removeProperty('--nsc-accent');
       [
@@ -1362,6 +1639,16 @@ class NotificationStackCard extends HTMLElement {
         el.innerHTML = html;
         el._html = html;
       }
+      // Title and message are set as text, apart from the rest, so a text update (a template result, a {since}) keeps the
+      // buttons and whatever has focus.
+      const ttl = el.querySelector('.ttl');
+      if (ttl && ttl.textContent !== String(a.title ?? '')) ttl.textContent = String(a.title ?? '');
+      // The message element stays in every card (hidden while blank), so a message appearing or going blank doesn't
+      // change the card's structure either.
+      const msgEl = el.querySelector('.msg');
+      const mi = msgEl?.querySelector('.mi');
+      if (mi && mi.textContent !== String(a.message ?? '')) mi.textContent = String(a.message ?? '');
+      if (msgEl && msgEl.hidden !== !a.message) msgEl.hidden = !a.message;
       const timeEl = el.querySelector('.time');
       if (timeEl) {
         const t = relTime(a.ts);
@@ -1405,6 +1692,20 @@ class NotificationStackCard extends HTMLElement {
     }
 
     requestAnimationFrame(() => this._layout());
+  }
+
+  /** Where the row ends in the scroller (its width plus the scroller's padding), whatever is still animating. */
+  _rowEnd() {
+    const cs = getComputedStyle(this._scroller);
+    return this._stack.offsetWidth + (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  }
+
+  /** Whether the list stays expanded: always, or while the card is at least `keep_expanded_width` wide. */
+  _keepExpanded(w = this._lastW || this._wrap?.clientWidth || 0) {
+    const k = this._config.keep_expanded;
+    if (k === 'always') return true;
+    if (k !== 'wide') return false;
+    return w > 0 && w >= (pxNumber(this._config.keep_expanded_width) || DEFAULTS.keep_expanded_width);
   }
 
   _snoozeEnabled(a) {
@@ -1480,8 +1781,8 @@ class NotificationStackCard extends HTMLElement {
           ${a.groupName && cfg.group_label === 'name' ? `<div class="grp">${esc(a.groupName)}</div>` : ''}
           <div class="trow">${
             a.group && cfg.group_label === 'dot' ? `<span class="gmark" title="${esc(a.groupName)}"></span>` : ''
-          }<span class="ttl">${esc(a.title)}</span>${time}</div>
-          ${a.message ? `<div class="msg"><span class="mi">${esc(a.message)}</span></div>` : ''}
+          }<span class="ttl"></span>${time}</div>
+          <div class="msg"><span class="mi"></span></div>
         </div>
         ${ibtns ? `<div class="ibtns">${ibtns}</div>` : ''}
       </div>
@@ -1499,6 +1800,57 @@ class NotificationStackCard extends HTMLElement {
     const n = alerts.length;
     // Compact: buttons stay hidden until the stack opens (or a lone card is tapped).
     this._stack.classList.toggle('compact', !!cfg.compact && !this._expanded);
+    const peekRaw = isBlank(cfg.peek_offset) ? NaN : Number(cfg.peek_offset);
+    const peek = Number.isFinite(peekRaw) ? Math.max(0, peekRaw) : 10;
+    const maxPeek = Math.max(0, Number(cfg.max_peek) || 0);
+    const peekCount = (len) => Math.min(len - 1, maxPeek);
+    // Side by side: the expanded list is a row of columns `colW` wide (never wider than the card), opening toward
+    // `expand_to`. Folded stacks (the closed card, a folded group) peek toward that side instead of below.
+    const horizontal = cfg.layout === 'horizontal';
+    const toLeft = horizontal && cfg.expand_to === 'left';
+    const side = this._expanded && n > 1 && horizontal;
+    const sideFold = !this._expanded && n > 1 && horizontal;
+    const cardW = this._scroller.clientWidth || this._stack.offsetWidth;
+    // Each column is at least MIN_COL wide, so the X always fits (the title needs about 240px to show).
+    const colW = side ? Math.max(MIN_COL, Math.min(pxNumber(cfg.item_width) || DEFAULTS.item_width, cardW)) : 0;
+    // A folded stack side by side peeks within its own space (the card, or one column): the top card keeps MIN_COL, the
+    // peeks tighten, then fewer cards peek, so nothing reaches past the card or into the next column.
+    const sidePeek = (w, len) => {
+      let count = peekCount(len);
+      let off = peek;
+      const room = Math.max(0, w - MIN_COL);
+      if (count && count * off > room) off = Math.max(Math.min(6, peek), Math.floor(room / count));
+      while (count > 0 && count * off > room) count -= 1;
+      return { count, off, width: w - count * off };
+    };
+    const narrowed = (w, len) => sidePeek(w, len).width;
+    const widths = new Map();
+    if (sideFold) alerts.forEach((a) => widths.set(a.id, narrowed(cardW, n)));
+    else if (side) {
+      for (const b of this._blocks) {
+        const folded = b.gid && !this._openGroups.has(b.gid);
+        b.alerts.forEach((a) => widths.set(a.id, folded ? narrowed(colW, b.alerts.length) : colW));
+      }
+    }
+    // A row that opens to the left is anchored at its right end, at the distance remembered from the user's scrolling
+    // (not measured now: the card may already have resized).
+    const sc = this._scroller;
+    const leftRow = side && toLeft;
+    const fromRight = leftRow && this._leftRow ? this._fromRight || 0 : 0;
+    this._stack.classList.toggle('side', side);
+    this._stack.style.direction = side ? getComputedStyle(this).direction : '';
+    // Side by side with a max height, up and down scrolls the list instead of dismissing; the X still dismisses.
+    this._stack.classList.toggle('noswipe', side && !!cssSize(cfg.height));
+    this._scroller.classList.toggle('hscroll', side);
+    this._items.forEach((el) => {
+      const w = widths.get(el.dataset.id);
+      el.style.width = w ? `${w}px` : '';
+      el.style.right = w ? 'auto' : '';
+    });
+    // Cards in an open group hide their group label (the group's heading names it), so hide it before measuring.
+    const inOpenGroup = new Set();
+    if (this._expanded) this._blocks.forEach((b) => b.gid && this._openGroups.has(b.gid) && b.alerts.forEach((a) => inOpenGroup.add(a.id)));
+    this._items.forEach((el) => el.classList.toggle('ingroup', inOpenGroup.has(el.dataset.id)));
     this._items.forEach((el) => this._fitMessage(el));
     const H = new Map();
     alerts.forEach((a) => {
@@ -1506,14 +1858,11 @@ class NotificationStackCard extends HTMLElement {
       H.set(a.id, el?.querySelector('.content')?.offsetHeight || 0);
     });
     const gap = 8;
-    const peekRaw = isBlank(cfg.peek_offset) ? NaN : Number(cfg.peek_offset);
-    const peek = Number.isFinite(peekRaw) ? Math.max(0, peekRaw) : 10;
-    const maxPeek = Math.max(0, Number(cfg.max_peek) || 0);
     let z = 1000;
     let total = 0;
     this._closedOf = new Map();
 
-    const fold = (list, y, limit, owner) => {
+    const fold = (list, y, limit, owner, x = 0) => {
       // A collapsed stack: top card plus up to `maxPeek` cards peeking below it.
       let h0 = H.get(list[0].id);
       let peekN = Math.min(list.length - 1, maxPeek);
@@ -1530,6 +1879,7 @@ class NotificationStackCard extends HTMLElement {
       list.forEach((a, i) => {
         const depth = Math.min(i, peekN);
         this._place(this._items.get(a.id), {
+          x,
           y: y + depth * off,
           s: 1 - depth * 0.05,
           h: h0,
@@ -1543,6 +1893,34 @@ class NotificationStackCard extends HTMLElement {
       return h0 + peekN * off;
     };
 
+    // Side by side: the top card, with up to `maxPeek` cards peeking out on the side the row opens toward.
+    // `x0`/`w` is the space it fills (the card, or one column).
+    const foldSide = (items, x0, w, owner, limit = 0) => {
+      const { count: peekN, off } = sidePeek(w, items.length);
+      let h0 = H.get(items[0].id);
+      let clip = 0;
+      if (limit && h0 > limit) {
+        h0 = Math.max(48, limit);
+        clip = h0;
+      }
+      items.forEach((a, i) => {
+        const depth = Math.min(i, peekN);
+        this._place(this._items.get(a.id), {
+          x: toLeft ? x0 + (peekN - depth) * off : x0 + depth * off,
+          y: 0,
+          s: 1 - depth * 0.05,
+          h: h0,
+          z: z--,
+          behind: i > 0,
+          hide: i > peekN,
+          clip: i === 0 ? clip : 0,
+          origin: toLeft ? '0% 50%' : '100% 50%',
+        });
+        if (owner) this._closedOf.set(a.id, { owner, top: i === 0 });
+      });
+      return h0;
+    };
+
     const list = (items, y, inGroup = false) => {
       items.forEach((a) => {
         this._place(this._items.get(a.id), { y, s: 1, h: H.get(a.id), z: z--, behind: false, hide: false, clip: 0, inGroup });
@@ -1552,12 +1930,15 @@ class NotificationStackCard extends HTMLElement {
     };
 
     this._heads.forEach((el) => this._placeHead(el, 0, false));
+    let rowW = 0;
 
     if (n === 0) {
       // Keep the space of the collapsed card: its last height on this layout, else the max collapsed height.
       total = cfg.when_empty === 'reserve' && !this.preview ? this._reserveH || pxNumber(cfg.collapsed_height) || 76 : 0;
     } else if (!this._expanded) {
-      total = n > 1 ? fold(alerts, 0, pxNumber(cfg.collapsed_height), 'main') : list(alerts, 0) - gap;
+      const limit = pxNumber(cfg.collapsed_height);
+      if (n <= 1) total = list(alerts, 0) - gap;
+      else total = sideFold ? foldSide(alerts, 0, cardW, 'main', limit) : fold(alerts, 0, limit, 'main');
       // Learn the height only from a closed stack: no card tapped open, no snooze options, no confirm pending,
       // and not the editor preview, whose width differs from the dashboard's.
       const opened =
@@ -1565,6 +1946,35 @@ class NotificationStackCard extends HTMLElement {
       if (!opened && !this.preview && Math.abs(total - this._reserveH) > 1) {
         this._reserveH = total;
         writeStore(this._keys.height, { h: total });
+      }
+    } else if (side) {
+      // One column per alert; a folded group takes one column, an open one a column per alert under its heading.
+      // Opening to the left, the first column is at the right edge and the row runs leftward.
+      const cols = this._blocks.reduce((c, b) => c + (b.gid && !this._openGroups.has(b.gid) ? 1 : b.alerts.length), 0);
+      rowW = Math.max(0, cols * (colW + gap) - gap);
+      if (toLeft) rowW = Math.max(rowW, cardW);
+      const colX = (c) => (toLeft ? rowW - (c + 1) * colW - c * gap : c * (colW + gap));
+      let c = 0;
+      const col = (a, y, inGroup) => {
+        this._place(this._items.get(a.id), { x: colX(c), y, s: 1, h: H.get(a.id), z: z--, behind: false, hide: false, clip: 0, inGroup });
+        total = Math.max(total, y + H.get(a.id));
+        c += 1;
+      };
+      for (const b of this._blocks) {
+        if (!b.gid) {
+          b.alerts.forEach((a) => col(a, 0, false));
+          continue;
+        }
+        const head = this._heads.get(b.gid);
+        if (this._openGroups.has(b.gid)) {
+          const span = b.alerts.length;
+          this._placeHead(head, 0, true, toLeft ? colX(c + span - 1) : colX(c), span * (colW + gap) - gap);
+          const top = (head?.offsetHeight || 28) + 4;
+          b.alerts.forEach((a) => col(a, top, true));
+        } else {
+          total = Math.max(total, foldSide(b.alerts, colX(c), colW, b.gid));
+          c += 1;
+        }
       }
     } else {
       let y = 0;
@@ -1585,8 +1995,17 @@ class NotificationStackCard extends HTMLElement {
     }
 
     this._stack.style.height = `${Math.max(0, total)}px`;
+    this._stack.style.width = rowW ? `${rowW}px` : '';
+    // It starts scrolled to that end, and as it grows or shrinks (an alert arrives, a group opens) it keeps its distance
+    // from it, so the first notification, or wherever the user scrolled to, stays in view.
+    // Measured against the row's own end, not scrollWidth, which still includes cards moving to their new places.
+    if (leftRow) sc.scrollLeft = Math.max(0, this._rowEnd() - sc.clientWidth - fromRight);
+    this._fromRight = fromRight;
+    this._leftRow = leftRow;
+    // Kept expanded, a tap elsewhere only closes what's open on top of the list (snooze options, an open
+    // sub-stack, a confirm, a card tapped open).
     this._watchOutside(
-      this._expanded || !!this._snoozeOpen || !!this._confirming || [...this._items.values()].some((el) => el.classList.contains('full'))
+      (this._expanded && (!this._kept || this._openGroups.size > 0)) || !!this._snoozeOpen || !!this._confirming || [...this._items.values()].some((el) => el.classList.contains('full'))
     );
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
@@ -1598,8 +2017,10 @@ class NotificationStackCard extends HTMLElement {
 
   _place(el, p) {
     if (!el) return;
+    el.style.setProperty('--px', `${p.x || 0}px`);
     el.style.setProperty('--y', `${p.y}px`);
     el.style.setProperty('--s', String(p.s));
+    el.style.transformOrigin = p.origin || '';
     el.style.height = `${p.h}px`;
     el.style.zIndex = String(p.z);
     el.classList.toggle('behind', p.behind);
@@ -1609,8 +2030,11 @@ class NotificationStackCard extends HTMLElement {
     if (p.clip) el.style.setProperty('--nsc-clip', `${p.clip}px`);
   }
 
-  _placeHead(el, y, on) {
+  _placeHead(el, y, on, x = 0, w = 0) {
     if (!el) return;
+    el.style.setProperty('--px', `${x}px`);
+    el.style.width = w ? `${w}px` : '';
+    el.style.right = w ? 'auto' : '';
     el.style.setProperty('--y', `${y}px`);
     el.classList.toggle('off', !on);
   }
@@ -1645,7 +2069,7 @@ class NotificationStackCard extends HTMLElement {
     const fold = this._foldOf(alert);
     if (fold && !fold.top) return fold.open();
 
-    if (t.closest('[data-close]')) return this._animateOut(item, 1, () => this._dismiss(alert));
+    if (t.closest('[data-close]')) return this._animateOut(item, 0, this._dismissAfter(alert));
     if (t.closest('[data-snz-open]')) {
       // On a folded stack, open it first so the snooze options have room.
       if (fold) fold.open();
@@ -1671,7 +2095,7 @@ class NotificationStackCard extends HTMLElement {
       this._haptic();
       const r = this._runAction(alert.tap_action, alert);
       if (r instanceof Promise) r.catch(() => {});
-    } else if (item.querySelector('.msg')) {
+    } else if (item.querySelector('.msg:not([hidden])')) {
       item.classList.toggle('full');
       this._layout();
     }
@@ -1679,6 +2103,7 @@ class NotificationStackCard extends HTMLElement {
 
   _setExpanded(v, user = false) {
     if (v && this._alerts.length <= 1) v = false;
+    if (!v && this._kept) return; // keep expanded: nothing folds it back
     if (this._expanded === v) return;
     this._expanded = v;
     this._confirming = null;
@@ -1698,7 +2123,7 @@ class NotificationStackCard extends HTMLElement {
   _fitMessage(el) {
     const msg = el.querySelector('.msg');
     if (!msg) return;
-    const scroll = this._config.message_overflow === 'scroll' && !el.classList.contains('full');
+    const scroll = this._config.message_overflow === 'scroll' && !el.classList.contains('full') && !msg.hidden;
     const horizontal = scroll && this._config.scroll_direction === 'horizontal' && !reducedMotion();
     if (!horizontal) {
       this._stopTicker(msg);
@@ -1787,7 +2212,7 @@ class NotificationStackCard extends HTMLElement {
 
   _isCut(item) {
     const msg = item.querySelector('.msg');
-    if (!msg || item.classList.contains('full')) return false;
+    if (!msg || msg.hidden || item.classList.contains('full')) return false;
     return msg.classList.contains('scrolling') || msg.classList.contains('marquee') || msg.scrollHeight > msg.clientHeight + 1;
   }
 
@@ -1802,7 +2227,7 @@ class NotificationStackCard extends HTMLElement {
   }
 
   _minimize() {
-    this._expanded = false;
+    this._expanded = !!this._kept && this._alerts.length > 1;
     this._openGroups.clear();
     this._snoozeOpen = null;
     this._confirming = null;
@@ -1826,7 +2251,7 @@ class NotificationStackCard extends HTMLElement {
   _armAutoCollapse() {
     clearTimeout(this._acTimer);
     const secs = Number(this._config.auto_collapse) || 0;
-    if (secs > 0) this._acTimer = setTimeout(() => this._setExpanded(false), secs * 1000);
+    if (secs > 0 && !this._kept) this._acTimer = setTimeout(() => this._setExpanded(false), secs * 1000);
   }
 
   _setConfirming(key) {
@@ -1907,9 +2332,11 @@ class NotificationStackCard extends HTMLElement {
     const store = this._keys.dismissed;
     const request = { id: alert.id, ended: false };
     if (dismiss) this._requests.add(request);
+    const base = this._storedJSON(alert);
     const token = {};
+    let parked = false;
     const release = () => {
-      this._requests.delete(request);
+      if (!parked) this._requests.delete(request);
       if (this._busy.get(key) !== token) return;
       this._busy.delete(key);
       this._refresh();
@@ -1923,9 +2350,15 @@ class NotificationStackCard extends HTMLElement {
       // A late answer dismisses only if the alert still has the button that was tapped, unchanged, and can still
       // be dismissed, and it hasn't stopped matching meanwhile. Hidden or snoozed meanwhile still counts; edited
       // away, removed or ended doesn't. The button counts as unchanged only if it's exactly the same (key order too).
-      const now = this._model?.get(alert.id);
-      const same = now?.dismissible && JSON.stringify(now.actions[j]) === JSON.stringify(b);
-      if (dismiss && this._keys.dismissed === store && same && !request.ended) this._dismiss(alert);
+      const ok = () => {
+        const now = this._model?.get(alert.id);
+        const same = now?.dismissible && JSON.stringify(now.actions[j]) === JSON.stringify(b);
+        return dismiss && this._keys.dismissed === store && same && !request.ended && this._sameIncident(alert);
+      };
+      if (ok()) {
+        parked = this._parkIfUnsure(alert, ok, base, request);
+        if (!parked) this._dismissLate(alert);
+      }
     } catch (e) {
       if (e?.nscOwn) this._fire('hass-notification', { message: e.message });
       if (this._busy.get(key) === token) this._flashFailed(key);
@@ -2028,6 +2461,79 @@ class NotificationStackCard extends HTMLElement {
     return request;
   }
 
+  /**
+   * Whether the alert as it was tapped is still the one showing: nothing new happened to it since (every current token
+   * was already in the tapped alert's). A dismissal that finishes later writes only then, so it can't overwrite a newer
+   * dismissal (from another card on the same key) with old tokens.
+   */
+  _sameIncident(alert) {
+    const now = this._model?.get(alert.id);
+    return !!now && now.tokens.every((t) => alert.tokens.includes(t));
+  }
+
+  /**
+   * A dismissal that finishes late (after the slide-out, or a button's answer) records the alert as it is now, as a
+   * tap now would: an entity that left a combined alert meanwhile isn't counted as seen, so it brings the alert back
+   * if it matches again. Home Assistant notifications keep the tapped one, to check it wasn't replaced.
+   */
+  _dismissLate(alert) {
+    const now = this._model?.get(alert.id);
+    this._dismiss(alert.kind === 'pn' || !now ? alert : { ...alert, tokens: now.tokens });
+  }
+
+  /** The stored dismissal for an entity alert, as JSON (what a late dismissal compares with). */
+  _storedJSON(alert) {
+    return alert.kind === 'pn' ? undefined : JSON.stringify(readStore(this._keys.dismissed)[alert.id]);
+  }
+
+  /**
+   * A late dismissal on a card whose states may be old (it left the page and hasn't had hass since): if another card
+   * changed this alert's stored dismissal since the tap, it can't tell whose is newer. It waits for the next hass and
+   * decides then, with `ok` (the same checks as now). The alert stays hidden meanwhile. Returns whether it waits.
+   */
+  _parkIfUnsure(alert, ok, base, request) {
+    if (this._fresh || alert.kind === 'pn' || this._storedJSON(alert) === base) return false;
+    this._requests.add(request); // still marked ended if its rule stops matching meanwhile
+    this._parked.add({ alert, ok, request });
+    this._refresh();
+    return true;
+  }
+
+  /** The next hass after waiting: each one dismisses if it still applies to the alert as it is now. */
+  _settleParked() {
+    const list = [...this._parked];
+    this._parked.clear();
+    list.forEach(({ alert, ok, request }) => {
+      const go = ok();
+      this._requests.delete(request);
+      if (go) this._dismissLate(alert);
+    });
+    this._refresh();
+  }
+
+  /**
+   * X and swipe dismiss once the slide-out ends. Like a button's late answer, that happens only if the alert is still
+   * one of this card's, can still be dismissed and hasn't ended meanwhile (conditions off and on make a new incident),
+   * with the same dismiss memory. Otherwise it stays (and slides back in).
+   */
+  _dismissAfter(alert) {
+    const store = this._keys.dismissed;
+    const request = { id: alert.id, ended: false };
+    const base = this._storedJSON(alert);
+    this._requests.add(request);
+    const ok = () => {
+      const now = this._model?.get(alert.id);
+      return this._keys.dismissed === store && now?.dismissible && !request.ended && this._sameIncident(alert);
+    };
+    return () => {
+      const go = ok();
+      if (go && this._parkIfUnsure(alert, ok, base, request)) return;
+      this._requests.delete(request);
+      if (go) this._dismissLate(alert);
+      else this._refresh();
+    };
+  }
+
   _snooze(item, alert, k) {
     const opt = this._optionsFor(alert)[k];
     const until = snoozeEnd(opt);
@@ -2041,12 +2547,21 @@ class NotificationStackCard extends HTMLElement {
     this._snoozed[alert.id] = rec;
     this._snoozed = mergeStore(this._keys.snoozed, this._snoozed, [alert.id], this);
     this._snoozeOpen = null;
-    this._animateOut(item, 1, () => this._refresh());
+    this._animateOut(item, 0, () => this._refresh());
   }
 
+  /** Side by side, notifications swipe and slide out up or down; otherwise sideways. */
+  _sideways() {
+    return !this._stack.classList.contains('side');
+  }
+
+  /** Slide a notification out, then run `done`. `dir` 1 or -1; 0 = the usual way (right, or up side by side). */
   _animateOut(el, dir, done) {
     this._haptic();
-    el.style.setProperty('--x', `${dir * (el.offsetWidth + 40)}px`);
+    const across = this._sideways();
+    const prop = across ? '--x' : '--dy';
+    const d = dir || (across ? 1 : -1);
+    el.style.setProperty(prop, `${d * ((across ? el.offsetWidth : el.offsetHeight) + 40)}px`);
     el.style.opacity = '0';
     el.style.pointerEvents = 'none';
     setTimeout(() => {
@@ -2054,6 +2569,7 @@ class NotificationStackCard extends HTMLElement {
       // Still showing (it came back as new meanwhile, or a snooze ended): slide it back in.
       if (this._items.get(el.dataset.id) !== el) return;
       el.style.removeProperty('--x');
+      el.style.removeProperty('--dy');
       el.style.opacity = '';
       el.style.pointerEvents = '';
     }, 240);
@@ -2064,17 +2580,19 @@ class NotificationStackCard extends HTMLElement {
     if (ev.target.closest('button')) return;
     const item = ev.target.closest('.item');
     const alert = this._alertFor(item);
-    if (!alert || !alert.dismissible) return;
+    if (!alert || !alert.dismissible || this._stack.classList.contains('noswipe')) return;
     const fold = this._foldOf(alert);
     if (fold && !fold.top) return;
-    this._drag = { item, alert, x0: ev.clientX, y0: ev.clientY, dx: 0, active: false, id: ev.pointerId };
+    const across = this._sideways();
+    this._drag = { item, alert, x0: ev.clientX, y0: ev.clientY, dx: 0, active: false, id: ev.pointerId, across };
   }
 
   _onPointerMove(ev) {
     const d = this._drag;
     if (!d || ev.pointerId !== d.id) return;
-    const dx = ev.clientX - d.x0;
-    const dy = ev.clientY - d.y0;
+    // `dx` is along the swipe (sideways, or up and down side by side); the other way scrolls.
+    const dx = d.across ? ev.clientX - d.x0 : ev.clientY - d.y0;
+    const dy = d.across ? ev.clientY - d.y0 : ev.clientX - d.x0;
     if (!d.active) {
       if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
       if (Math.abs(dy) >= Math.abs(dx)) {
@@ -2090,8 +2608,8 @@ class NotificationStackCard extends HTMLElement {
       }
     }
     d.dx = dx;
-    d.item.style.setProperty('--x', `${dx}px`);
-    d.item.style.opacity = String(Math.max(0.35, 1 - Math.abs(dx) / (d.item.offsetWidth || 1)));
+    d.item.style.setProperty(d.across ? '--x' : '--dy', `${dx}px`);
+    d.item.style.opacity = String(Math.max(0.35, 1 - Math.abs(dx) / ((d.across ? d.item.offsetWidth : d.item.offsetHeight) || 1)));
   }
 
   _onPointerUp(ev, cancelled) {
@@ -2103,10 +2621,14 @@ class NotificationStackCard extends HTMLElement {
       this._suppressClick = false;
     }, 80);
     d.item.classList.remove('dragging');
-    if (!cancelled && Math.abs(d.dx) > (d.item.offsetWidth || 1) * 0.35) {
-      this._animateOut(d.item, Math.sign(d.dx), () => this._dismiss(d.alert));
+    // Up and down, a notification is shorter than it is wide, so a shorter swipe counts.
+    const size = d.across ? d.item.offsetWidth : Math.max(60, d.item.offsetHeight);
+    // Its card was replaced while the finger was down: the alert came back as a new incident, so it isn't dismissed.
+    const replaced = this._items.get(d.alert.id) !== d.item;
+    if (!cancelled && !replaced && Math.abs(d.dx) > (size || 1) * 0.35) {
+      this._animateOut(d.item, Math.sign(d.dx), this._dismissAfter(d.alert));
     } else {
-      d.item.style.setProperty('--x', '0px');
+      d.item.style.setProperty(d.across ? '--x' : '--dy', '0px');
       d.item.style.opacity = '';
     }
   }
@@ -2195,6 +2717,11 @@ const LABELS = {
   message_overflow: 'Longer messages',
   scroll_direction: 'Scroll direction',
   auto_collapse: 'Auto-collapse after',
+  keep_expanded: 'Keep expanded',
+  keep_expanded_width: 'Card at least',
+  layout: 'Expanded layout',
+  item_width: 'Notification width',
+  expand_to: 'Opens toward',
   sort: 'Sort by',
   show_time: 'Show time',
   group_label: 'Group on each card',
@@ -2261,7 +2788,8 @@ const HELPERS = {
   when_empty:
     'Hide: takes no space. Keep its space: invisible, but holds the height of the collapsed card so nothing below moves. Show: displays the empty text.',
   width: 'e.g. 360px or 90%. Blank fills the space.',
-  height: 'e.g. 420px. The list scrolls past it.',
+  height:
+    'e.g. 420px. The list scrolls past it. Side by side, up and down then scrolls the list instead of dismissing a notification: use its X.',
   collapsed_height:
     'In px, includes the peeking cards. Tighter peeks first, then fewer peeking cards, then the top card fades out at the bottom.',
   show_groups: 'Leave empty to show every group.',
@@ -2274,6 +2802,13 @@ const HELPERS = {
   message_overflow: 'Scrolling moves slowly through text past the line limit: up and back, or right to left like a ticker. Tap a card to show it all.',
   scroll_direction: 'Right to left keeps each message on one line and scrolls it like a ticker. Message lines then doesn\'t apply.',
   zone_person: 'Used when the viewer has no person, e.g. a wall tablet. Groups can override it.',
+  keep_expanded:
+    'Shows every notification without stacking. "Wide enough" does it only on wider cards (a desktop or tablet) and stacks on phones. Set a max height to scroll a long list.',
+  keep_expanded_width: "The card's own width, not the screen's.",
+  layout:
+    'Side by side puts the expanded list in a row that scrolls sideways, and the closed stack peeks out toward that side. Swipe a notification up or down to dismiss it; with a max height when expanded, up and down scrolls the list instead, and the X dismisses.',
+  expand_to: 'Left puts the first notification at the right edge, with the row running leftward.',
+  item_width: 'Width of each notification side by side, at least 160px (the title needs about 240px to show). Never wider than the card.',
   storage_key: 'Give a second copy of this card its own dismiss/snooze memory.',
   until_zone: 'Ends the next time this person arrives. If they are there already, it waits until they leave and come back.',
   person: 'Blank: whoever is viewing (or the zone person set for the group or card).',
@@ -2284,7 +2819,9 @@ const HELPERS = {
 };
 const ALERT_HELPERS = {
   state: 'Comma separated. Use the state as shown (Clear, Unlocked) or its raw value (off, unlocked); not case-sensitive. Leave all match fields blank to match "on".',
-  message: 'Placeholders: {name} {state} {value} {since} {attr:key}',
+  title: 'Placeholders like {name}, or a Home Assistant template: {{ states(entity) }}',
+  message:
+    'Placeholders: {name} {state} {value} {since} {attr:key}. Or a Home Assistant template with {{ }}, which gets entity, entities, name, names and count.',
   combined_title: 'Used when 2+ entities match. Adds {count} and {names}.',
   conditions: '- entity: input_boolean.away_mode\n  state: "on"',
   id: 'Keeps dismiss/snooze memory if you reorder alerts.',
@@ -2528,6 +3065,9 @@ class NotificationStackCardEditor extends HTMLElement {
       when_empty: oneOf(c.when_empty, EMPTY_MODES, c.hide_when_empty === false ? 'show' : 'hide'),
       snoozed_position: oneOf(c.snoozed_position, SNOOZED_POSITIONS, c.show_snoozed === false ? 'hidden' : 'buttons'),
       scroll_direction: oneOf(c.scroll_direction, SCROLL_DIRECTIONS, 'vertical'),
+      keep_expanded: keepExpandedOf(c.keep_expanded),
+      layout: oneOf(c.layout, LAYOUTS, 'vertical'),
+      expand_to: oneOf(c.expand_to, EXPAND_TO, 'right'),
       persistent_group: c.persistent_group || '__none',
     };
   }
@@ -2714,6 +3254,38 @@ class NotificationStackCardEditor extends HTMLElement {
           },
           { name: 'auto_collapse', selector: sel.num(0, 600, 's') }
         ),
+        grid(
+          {
+            name: 'keep_expanded',
+            selector: sel.select([
+              { value: 'never', label: 'No, stack and expand on tap' },
+              { value: 'always', label: 'Always' },
+              { value: 'wide', label: 'When the card is wide enough' },
+            ]),
+          },
+          ...(this._topData().keep_expanded === 'wide' ? [{ name: 'keep_expanded_width', selector: sel.num(200, 4000, 'px') }] : [])
+        ),
+        grid(
+          {
+            name: 'layout',
+            selector: sel.select([
+              { value: 'vertical', label: 'Top to bottom' },
+              { value: 'horizontal', label: 'Side by side' },
+            ]),
+          },
+          ...(this._topData().layout === 'horizontal' ? [{ name: 'item_width', selector: sel.num(MIN_COL, 1000, 'px') }] : [])
+        ),
+        ...(this._topData().layout === 'horizontal'
+          ? [
+              {
+                name: 'expand_to',
+                selector: sel.select([
+                  { value: 'right', label: 'To the right' },
+                  { value: 'left', label: 'To the left' },
+                ]),
+              },
+            ]
+          : []),
       ]),
       expandable('g_text', 'Text', 'mdi:format-size', [
         grid(
@@ -2773,7 +3345,9 @@ class NotificationStackCardEditor extends HTMLElement {
       ]),
     ];
     // scroll_direction only shows with Scroll, so list it explicitly; the form passes it through either way.
-    const generalKeys = [...new Set([...schemaKeys(generalSchema()), 'scroll_direction'])];
+    const generalKeys = [
+      ...new Set([...schemaKeys(generalSchema()), 'scroll_direction', 'keep_expanded_width', 'item_width', 'expand_to']),
+    ];
     ed.appendChild(this._form(generalSchema, () => this._topData(), (v) => this._setTop(v, generalKeys)));
 
     this._buildTemplates(ed);

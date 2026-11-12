@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.9.4 — 2026-11-07
+
+New layout options and Home Assistant templates. Existing configs keep working unchanged.
+
+**New**
+
+- **`keep_expanded`**: show every notification without stacking. `always`, or `wide` to do it only while the card is at least `keep_expanded_width` wide (800px by default), so a desktop or tablet shows the full list and a phone keeps the stack. Kept expanded, nothing folds the list back (a tap elsewhere, a pop-up opening or `auto_collapse`), and **Show less** is hidden. Group sub-stacks still fold (tap one to open it) unless `group_stacks: false`. With `height` set, a long list scrolls. ([#1](https://github.com/Big-Xan/notification-stack-card/issues/1))
+- **`layout: horizontal`**: the expanded list sits side by side in a row that scrolls sideways, for wide wall tablets. `item_width` sets each notification's width (300px by default, 160px at least), and `expand_to: left` opens the row leftward from the right edge instead of rightward (right and left are the same in right-to-left languages). The closed stack and folded groups peek out toward the side the row opens, so you can see which way it goes. Open groups get their heading across their columns. Side by side, you swipe a notification up or down to dismiss it, since a sideways swipe scrolls the row, and a mouse wheel scrolls the row too. With `height` set, up and down scrolls the list instead and the X dismisses, so a tall notification or open group is always reachable by touch.
+- **Home Assistant templates (Jinja) in titles and messages** ([#2](https://github.com/Big-Xan/notification-stack-card/issues/2)). Text with `{{ }}`, `{% %}` or `{# #}` is rendered by Home Assistant and updates by itself. Templates get the alert's `entity`, `entities`, `name`, `names` and `count`. Text without them works as before and is never sent to Home Assistant.
+- All three are in the visual editor under **Size and layout** and in the alert's title and message help.
+
+**Fixes**
+
+- **A long card title no longer runs under the header buttons** (the snoozed count, **Clear**, **Show less**). It now ends with … before them, in every header alignment.
+- **Opening a group no longer leaves empty space at the bottom of its notifications.** Each card was measured with the group name still showing, and the name is hidden once the group's heading is above it. They were the height of one extra line until the card next redrew.
+- **X or a swipe no longer dismisses an alert that came back while the card slid out**, or while you were still holding the swipe. If its conditions (or its group's) turned off and on in that moment, it's a new alert and now stays, as it already did for buttons. This also covers Home Assistant notifications, which are no longer dismissed in Home Assistant in that case.
+- **A dismissal that finishes late no longer undoes a newer one.** If the alert changed while an X slid out or a button's request ran, it now stays as the new alert, and a dismissal of that new alert from another card on the same `storage_key` is kept, also when the card with the button left the screen before it finished. Before, the old dismissal overwrote it and the alert came back on both cards.
+- **A card with `when_empty: hide` keeps showing new persistent notifications after it hides itself.** Home Assistant takes a hidden card off the page, and the card stopped listening for notifications there, so new ones, and snoozed ones coming back (when the snooze ran out or Home Assistant sent them again), only showed after a reload.
+- **Dismissing or snoozing in one browser tab is no longer undone by another tab.** A tab left in the background (Home Assistant pauses its connection after a while) could see the newer dismissal as ended and remove it on every tab. It now waits for current states first.
+- **A dismissal that finishes late records the alert as it is then.** If an entity stopped matching a combined alert while the X or a swipe slid it out, or while a button's action ran, the alert now comes back when that entity matches again, as it would have after a tap at that moment.
+- **A card coming back on screen catches up.** A card in another view or a closed pop-up showed alerts you had meanwhile dismissed or snoozed on another card with the same `storage_key`, until the next change or a reload.
+- **A changing title or message no longer redraws the buttons.** When the text updates (a `{since}`, an attribute, a template), including a message that appears or goes blank, only the text changes now: a button you've moved to with the keyboard keeps its focus, and a tap that lands as the text changes still counts.
+
 ## 0.9.3 — 2026-11-05
 
 A fix release. No options changed and existing configs keep working.

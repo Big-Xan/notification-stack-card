@@ -20,10 +20,12 @@ One self-contained JavaScript file. No dependencies. Includes a visual editor.
 ## Features
 
 - **Stack that expands on tap**, with the most severe and newest alert on top and up to five cards peeking behind
+- **Keep it expanded** always, or only on wider screens, and lay the list out **side by side** in a row that scrolls sideways (wall tablets)
 - **Rules from entity states**: `state`, `state_not`, `above`, `below`, `attribute`, plus extra `conditions`
 - **Groups**: shared color, icon, severity, buttons, tap action and snooze options, plus **quiet hours**, **zones** and **sub-stacks**
 - **Templates**: share one card's groups and alerts and reuse them on any dashboard, while each card keeps its own layout
 - **Combine**: one notification for several matching entities ("3 windows open")
+- **Home Assistant templates** (Jinja) in titles and messages, alongside the simple `{placeholders}`
 - **Action buttons**: perform-action, navigate, more-info, toggle, url, dismiss, with optional tap-twice confirm
 - **Buttons dismiss only after the action goes through**: with `dismiss: true`, a service action has to succeed first. If Home Assistant reports an error, the notification stays and you can try again
 - **Dismiss** with the X or a swipe; **snooze** with your own options and labels
@@ -61,7 +63,7 @@ HACS adds the dashboard resource for you and updates its version on every update
 
 1. Download `notification-stack-card.js` from the [latest release](https://github.com/Big-Xan/notification-stack-card/releases/latest) and copy it to `/config/www/`.
 2. Add a dashboard resource: **Settings → Dashboards → ⋮ → Resources → Add resource**
-   - URL: `/local/notification-stack-card.js?v=0.9.3`
+   - URL: `/local/notification-stack-card.js?v=0.9.4`
    - Type: JavaScript module
 3. Reload the browser. Bump the `?v=` number after every update.
 
@@ -156,13 +158,18 @@ For the YAML equivalents, see [Card options](#card-options), [Groups](#groups), 
 | `card_align` | `left` | Card position when `width` is set |
 | `collapsed_height` | none | Max height of the collapsed stack in px, peeking cards included. Peeks tighten first, then fewer cards peek, then the top card fades out at the bottom |
 | `compact` | `false` | While collapsed, hide buttons so the stack stays short. They appear when the stack opens, or with a first tap on a single card |
-| `height` | none | Max height of the expanded list; it scrolls past this |
+| `height` | none | Max height of the expanded list; it scrolls past this. Side by side, up and down then scrolls the list instead of dismissing a notification; use its X |
 | `max_peek` | `2` | Cards peeking behind the top card |
 | `peek_offset` | `10` | Pixels each peeking card shows (`0` stacks them exactly) |
 | `message_lines` | `2` | Message lines shown before the rest is cut off (tap to show all) |
 | `message_overflow` | `truncate` | `truncate` (ends with …) or `scroll` (longer text moves instead of being cut off) |
 | `scroll_direction` | `vertical` | With `scroll`: `vertical` scrolls up through the lines and back; `horizontal` keeps each message on one line and scrolls it right to left like a ticker (`message_lines` then doesn't apply) |
 | `auto_collapse` | `0` | Seconds before the expanded list folds back (0 = never) |
+| `keep_expanded` | `never` | `never`: stack, expand on tap. `always`: show every notification, without folding back. `wide`: only while the card is at least `keep_expanded_width` wide (e.g. desktop and tablet), stacking on narrower screens. Group sub-stacks still fold (tap one to open it) unless `group_stacks: false`. Use `height` to scroll a long list |
+| `keep_expanded_width` | `800` | With `keep_expanded: wide`, the card width (px, the card's own, not the screen's) from which it stays expanded |
+| `layout` | `vertical` | The expanded list: `vertical` (top to bottom) or `horizontal` (side by side in a row that scrolls sideways). Side by side, the closed stack and folded groups peek out toward the side the row opens, and you swipe a notification up or down to dismiss it. With `height` set, up and down scrolls the list instead, and the X dismisses |
+| `item_width` | `300` | With `layout: horizontal`, the width of each notification in px: at least `160` (the title needs about `240` to show), never wider than the card |
+| `expand_to` | `right` | With `layout: horizontal`, which way the row opens: `right`, or `left` (the first notification at the right edge, the row running leftward). Right and left are the same in right-to-left languages |
 | `sort` | `severity` | `severity` (then newest) or `time` |
 | `show_time` | `true` | Relative time on each card |
 | `group_label` | `name` | How each card shows its group: `name`, `dot` (color dot only) or `none` |
@@ -260,7 +267,7 @@ groups:
 | `severity` | `critical`, `warning` or `info` (sort order and color) |
 | `color`, `icon` | Override the group or severity look |
 | `background_color`, `text_color` | Override the group's or card's colors for this alert |
-| `title`, `message` | Text with placeholders |
+| `title`, `message` | Text with placeholders, or a [Home Assistant template](#home-assistant-templates-jinja) |
 | `combine` | One notification for all matching entities |
 | `combined_title`, `combined_message` | Text used when 2 or more entities match |
 | `dismissible`, `snoozable` | Default `true`; snoozable follows dismissible |
@@ -269,6 +276,30 @@ groups:
 | `snooze_options` | This alert's own snooze options, used instead of its group's or the card's |
 
 **Placeholders:** `{name}` (the entity's name as Home Assistant shows it) `{state}` (translated) `{value}` (raw) `{since}` `{attr:key}`, plus `{count}` and `{names}` on combined alerts.
+
+### Home Assistant templates (Jinja)
+
+For anything the placeholders can't do, `title`, `message`, `combined_title` and `combined_message` can be Home Assistant templates. Any text with `{{ }}`, `{% %}` or `{# #}` is sent to Home Assistant to render, and it updates on its own whenever the result changes:
+
+```yaml
+alerts:
+  - id: low_batteries
+    entities: [sensor.door_battery, sensor.window_battery]
+    below: 20
+    combine: true
+    title: Low batteries
+    combined_message: >-
+      {% for e in entities %}{{ state_attr(e, 'friendly_name') }} {{ states(e) }}%{% if not loop.last %}, {% endif %}{% endfor %}
+  - id: washer
+    entity: binary_sensor.washer_done
+    message: "Done {{ relative_time(states[entity].last_changed) }} ago"
+```
+
+- Each template gets the alert's `entity` (the matching entity; on a combined alert, the one that changed most recently), `entities` (a list of all the matching ones, most recent first), `name`, `names` (their names joined into one text, as `{names}` shows them) and `count`.
+- In a template, use these instead of `{name}`-style placeholders; the two aren't mixed in one text.
+- Until Home Assistant answers, the title shows the entity's name and the message stays empty. A template that can't be rendered shows as written, with the reason in the browser console.
+- Home Assistant renders the template on your own server, only while an alert using it is active (its rule matches, even if it's dismissed or snoozed). Text without `{{ }}`, `{% %}` or `{# #}` is never sent.
+- The rendered text doesn't affect dismiss and snooze: those still follow the entities' changes.
 
 ## Templates
 
